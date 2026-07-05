@@ -54,7 +54,8 @@ Current status:
 
 - The CLI preview is included in this repository.
 - During development, run it with `node out/cli.js`.
-- A standalone npm package or archive can be added later.
+- Release builds can include `codemap-everywhere-cli-<version>.zip`.
+- A standalone npm package can be added later.
 
 ## 3. Agent Skill
 

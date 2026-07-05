@@ -2,6 +2,7 @@
 .codemap/**
 .codemapignore
 .gitignore
+dist/**
 src/**
 scripts/**
 node_modules/**

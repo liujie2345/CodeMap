@@ -152,6 +152,7 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
+    "package:cli": "npm run compile && powershell -ExecutionPolicy Bypass -File scripts/package-cli.ps1",
     "smoke": "npm run compile && node scripts/smoke-search-ranking.js",
     "watch": "tsc -watch -p ./",
     "vsix": "vsce package",

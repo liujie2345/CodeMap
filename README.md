@@ -210,6 +210,12 @@ Package a local VSIX:
 npm run vsix
 ```
 
+Package the CLI preview zip:
+
+```bash
+npm run package:cli
+```
+
 Run the CLI locally after compiling:
 
 ```bash
