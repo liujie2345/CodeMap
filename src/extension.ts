@@ -1,6 +1,6 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { BuildIndexProgress, CodeMapIndexer } from './indexer';
+import { BuildIndexProgress, CodeMapIndexer, DEFAULT_INCLUDE_GLOB } from './indexer';
 import { searchIndex } from './search';
 import { CodeMapResultKind, SearchEverywhereItem, SearchResult } from './types';
 
@@ -70,7 +70,7 @@ export function activate(context: vscode.ExtensionContext): void {
     })
   );
 
-  const watcher = vscode.workspace.createFileSystemWatcher('**/*.{ts,tsx,js,jsx,mjs,cjs,py}');
+  const watcher = vscode.workspace.createFileSystemWatcher(DEFAULT_INCLUDE_GLOB);
   context.subscriptions.push(
     watcher,
     watcher.onDidCreate((uri) => indexer.updateFile(uri)),

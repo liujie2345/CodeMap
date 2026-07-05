@@ -2,7 +2,7 @@
 
 CodeMap is a VS Code extension that adds fast Search Everywhere navigation for large workspaces.
 
-Version `0.2.0` focuses on TypeScript, JavaScript, and Python projects.
+Version `0.2.1` focuses on fast, basic symbol navigation across common project languages.
 
 ## Commands
 
@@ -28,7 +28,7 @@ Search panel shortcut:
 - Class search
 - Function search
 - Interface and type search
-- Python class and function search
+- Basic symbol search for TypeScript, JavaScript, Python, Lua, Java, Kotlin, Go, Rust, C/C++, C#, PHP, Ruby, Swift, Dart, Vue, Svelte, Shell, and PowerShell
 - Basic text search
 - Grouped QuickPick results
 - Dedicated search panel with All, Symbols, Classes, Functions, Files, and Text modes
@@ -41,6 +41,8 @@ Search panel shortcut:
 - Clear index command
 
 CodeMap can still read the old `.codemap/index.json` prototype format, but new builds write the split JSONL format.
+
+Language support in this prototype is regex-based. It is intended for fast navigation and common declarations, not complete compiler-grade parsing.
 
 ## Ignore Rules
 

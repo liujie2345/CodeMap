@@ -2,7 +2,7 @@
   "name": "codemap",
   "displayName": "CodeMap",
   "description": "Fast Search Everywhere for large VS Code workspaces.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "codemap",
   "license": "UNLICENSED",
   "engines": {
@@ -63,7 +63,7 @@
         "codemap.includeGlobs": {
           "type": "array",
           "default": [
-            "**/*.{ts,tsx,js,jsx,mjs,cjs,py}"
+            "**/*.{ts,tsx,js,jsx,mjs,cjs,py,lua,java,kt,kts,go,rs,cs,cpp,cxx,cc,c,h,hpp,php,rb,swift,dart,vue,svelte,sh,bash,zsh,ps1}"
           ],
           "items": {
             "type": "string"
