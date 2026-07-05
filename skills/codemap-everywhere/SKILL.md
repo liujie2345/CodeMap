@@ -30,6 +30,12 @@ node out/cli.js search "<query>" --kind symbol --json
 
 Run commands from the repository root unless the user provides another workspace path.
 
+If the CLI was downloaded as a release zip and is not on `PATH`, use the full Node command path, for example:
+
+```bash
+node C:/tools/codemap-everywhere-cli/out/cli.js search "<query>" --kind symbol --json
+```
+
 ## Workflow
 
 1. Check for an index:
@@ -92,3 +98,19 @@ Use `location.relativePath` and `location.line` to open targeted code.
 ## Fallback
 
 If CodeMap is unavailable or the index cannot be built, fall back to normal repository search tools such as `rg`.
+
+## Installation Note
+
+This skill is designed as a portable Agent Skill draft. Different agent runtimes use different skill installation locations.
+
+Keep the folder structure intact:
+
+```text
+codemap-everywhere/
+  SKILL.md
+```
+
+The CLI and the skill are separate pieces:
+
+- CLI provides the search capability.
+- Skill teaches the agent when and how to use it.

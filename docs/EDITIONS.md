@@ -80,6 +80,13 @@ Initial skill location:
 skills/codemap-everywhere/SKILL.md
 ```
 
+See also:
+
+```text
+docs/AI_ENHANCED_EDITION.md
+docs/AGENT_USAGE.md
+```
+
 ## Shared Index
 
 All editions use the same local index format:

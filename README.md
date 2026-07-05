@@ -39,9 +39,9 @@ CodeMap Everywhere is one repository with three usage paths:
 
 - **VS Code Extension**: interactive Search Everywhere panel for developers.
 - **CLI**: terminal and script interface for code search.
-- **Agent Skill**: instructions for AI agents to use CodeMap before reading files.
+- **AI Enhanced Edition**: CLI plus Agent Skill instructions for AI coding agents.
 
-See [docs/EDITIONS.md](docs/EDITIONS.md) and [docs/AGENT_USAGE.md](docs/AGENT_USAGE.md).
+See [docs/EDITIONS.md](docs/EDITIONS.md), [docs/AI_ENHANCED_EDITION.md](docs/AI_ENHANCED_EDITION.md), and [docs/AGENT_USAGE.md](docs/AGENT_USAGE.md).
 
 ## Supported Languages
 
