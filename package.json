@@ -2,7 +2,7 @@
   "name": "codemap",
   "displayName": "CodeMap",
   "description": "Fast Search Everywhere for large VS Code workspaces.",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "publisher": "codemap",
   "license": "UNLICENSED",
   "engines": {
@@ -133,6 +133,7 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
+    "smoke": "npm run compile && node scripts/smoke-search-ranking.js",
     "watch": "tsc -watch -p ./",
     "vsix": "vsce package",
     "vscode:prepublish": "npm run compile"

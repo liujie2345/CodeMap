@@ -3,6 +3,7 @@
 .codemapignore
 .gitignore
 src/**
+scripts/**
 node_modules/**
 CODEMAP_VERSION_PLAN.md
 tsconfig.json

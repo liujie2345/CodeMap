@@ -103,6 +103,8 @@ function matchFile(file: CodeMapFile, query: NormalizedQuery): SearchResult | un
 
 interface NormalizedQuery {
   raw: string;
+  rawLower: string;
+  separated: string;
   compact: string;
   tokens: string[];
 }
@@ -113,26 +115,53 @@ function normalizeQuery(rawQuery: string): NormalizedQuery | undefined {
     return undefined;
   }
 
-  const compact = raw.toLowerCase().replace(/[\s._/-]+/g, '');
+  const rawLower = raw.toLowerCase();
+  const separated = normalizeSeparators(rawLower);
+  const compact = rawLower.replace(/[\s._/-]+/g, '');
   const tokens = raw
     .toLowerCase()
     .split(/[\s._/-]+/)
     .map((token) => token.trim())
     .filter(Boolean);
 
-  return { raw, compact, tokens };
+  return { raw, rawLower, separated, compact, tokens };
 }
 
 function scoreCandidate(candidate: string, query: NormalizedQuery): number {
   const normalized = candidate.toLowerCase();
+  const separated = normalizeSeparators(normalized);
   const compact = normalized.replace(/[\s._/-]+/g, '');
+  const baseName = path.basename(normalized);
+  const baseNameWithoutExtension = stripExtension(baseName);
+  const separatedBaseName = normalizeSeparators(baseName);
+  const separatedBaseNameWithoutExtension = stripExtension(separatedBaseName);
+
+  if (normalized === query.rawLower || baseName === query.rawLower || baseNameWithoutExtension === query.rawLower) {
+    return 720;
+  }
+
+  if (
+    separated === query.separated
+    || separatedBaseName === query.separated
+    || separatedBaseNameWithoutExtension === query.separated
+  ) {
+    return 680;
+  }
 
   if (compact === query.compact) {
-    return 360;
+    return 560 - lengthPenalty(compact, query.compact, 120);
+  }
+
+  if (separated.startsWith(query.separated) || separatedBaseName.startsWith(query.separated)) {
+    return 470 - lengthPenalty(separated, query.separated, 120);
   }
 
   if (compact.startsWith(query.compact)) {
-    return 300 - Math.min(compact.length - query.compact.length, 80);
+    return 390 - lengthPenalty(compact, query.compact, 120);
+  }
+
+  if (separated.includes(query.separated) || separatedBaseName.includes(query.separated)) {
+    return 330 - Math.min(firstPositiveIndex([separated.indexOf(query.separated), separatedBaseName.indexOf(query.separated)]), 80);
   }
 
   if (compact.includes(query.compact)) {
@@ -149,6 +178,24 @@ function scoreCandidate(candidate: string, query: NormalizedQuery): number {
   }
 
   return 0;
+}
+
+function normalizeSeparators(value: string): string {
+  return value.toLowerCase().replace(/[\s._/-]+/g, '-').replace(/^-+|-+$/g, '');
+}
+
+function stripExtension(value: string): string {
+  const parsed = path.parse(value);
+  return parsed.name;
+}
+
+function lengthPenalty(candidate: string, query: string, maxPenalty: number): number {
+  return Math.min(Math.max(candidate.length - query.length, 0), maxPenalty);
+}
+
+function firstPositiveIndex(indexes: number[]): number {
+  const positive = indexes.filter((index) => index >= 0);
+  return positive.length > 0 ? Math.min(...positive) : 0;
 }
 
 function fuzzyScore(candidate: string, query: string): number {
