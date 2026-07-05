@@ -33,6 +33,16 @@ If you want a Search Everywhere experience closer to JetBrains IDEs, but inside 
 - `.codemapignore` support for excluding resources, generated files, and large folders.
 - Index info view with file count, symbol count, language counts, and storage path.
 
+## Editions
+
+CodeMap Everywhere is one repository with three usage paths:
+
+- **VS Code Extension**: interactive Search Everywhere panel for developers.
+- **CLI**: terminal and script interface for code search.
+- **Agent Skill**: instructions for AI agents to use CodeMap before reading files.
+
+See [docs/EDITIONS.md](docs/EDITIONS.md) and [docs/AGENT_USAGE.md](docs/AGENT_USAGE.md).
+
 ## Supported Languages
 
 CodeMap Everywhere currently provides regex-based symbol extraction for common declarations in:
