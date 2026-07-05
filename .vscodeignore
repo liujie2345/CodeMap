@@ -1,0 +1,9 @@
+.vscode/**
+.codemap/**
+.codemapignore
+.gitignore
+src/**
+node_modules/**
+CODEMAP_VERSION_PLAN.md
+tsconfig.json
+*.log

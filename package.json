@@ -1,0 +1,124 @@
+{
+  "name": "codemap",
+  "displayName": "CodeMap",
+  "description": "Fast Search Everywhere for large VS Code workspaces.",
+  "version": "0.2.0",
+  "publisher": "codemap",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.92.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:codemap.searchEverywhere",
+    "onCommand:codemap.openSearchPanel",
+    "onCommand:codemap.buildIndex",
+    "onCommand:codemap.showIndexInfo",
+    "onCommand:codemap.clearIndex",
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "codemap.searchEverywhere",
+        "title": "CodeMap: Search Everywhere"
+      },
+      {
+        "command": "codemap.openSearchPanel",
+        "title": "CodeMap: Open Search Panel"
+      },
+      {
+        "command": "codemap.buildIndex",
+        "title": "CodeMap: Build Index"
+      },
+      {
+        "command": "codemap.showIndexInfo",
+        "title": "CodeMap: Show Index Info"
+      },
+      {
+        "command": "codemap.clearIndex",
+        "title": "CodeMap: Clear Index"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "codemap.searchEverywhere",
+        "key": "ctrl+shift+alt+o",
+        "mac": "cmd+shift+alt+o",
+        "when": "editorTextFocus || explorerViewletVisible"
+      },
+      {
+        "command": "codemap.openSearchPanel",
+        "key": "ctrl+shift+alt+m",
+        "mac": "cmd+shift+alt+m",
+        "when": "editorTextFocus || explorerViewletVisible"
+      }
+    ],
+    "configuration": {
+      "title": "CodeMap",
+      "properties": {
+        "codemap.includeGlobs": {
+          "type": "array",
+          "default": [
+            "**/*.{ts,tsx,js,jsx,mjs,cjs,py}"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Workspace glob patterns included in the CodeMap index."
+        },
+        "codemap.excludeGlobs": {
+          "type": "array",
+          "default": [
+            "**/node_modules/**",
+            "**/.git/**",
+            "**/.codemap/**",
+            "**/dist/**",
+            "**/build/**",
+            "**/coverage/**",
+            "**/.next/**",
+            "**/.turbo/**",
+            "**/.cache/**",
+            "**/.venv/**",
+            "**/venv/**",
+            "**/__pycache__/**",
+            "**/.pytest_cache/**",
+            "**/.mypy_cache/**",
+            "**/.ruff_cache/**"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "Workspace glob patterns excluded from the CodeMap index."
+        },
+        "codemap.maxFileSizeBytes": {
+          "type": "number",
+          "default": 1048576,
+          "minimum": 1024,
+          "description": "Maximum file size CodeMap will index."
+        },
+        "codemap.maxTextMatches": {
+          "type": "number",
+          "default": 80,
+          "minimum": 0,
+          "description": "Maximum text matches returned for one search."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vsix": "vsce package",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.10",
+    "@types/vscode": "^1.92.0",
+    "@vscode/vsce": "^3.2.2",
+    "typescript": "^5.8.2"
+  }
+}
