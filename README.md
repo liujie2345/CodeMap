@@ -2,11 +2,12 @@
 
 CodeMap is a VS Code extension that adds fast Search Everywhere navigation for large workspaces.
 
-Version `0.2.1` focuses on fast, basic symbol navigation across common project languages.
+Version `0.2.2` focuses on fast, basic symbol navigation across common project languages.
 
 ## Commands
 
 - `CodeMap: Build Index`
+- `CodeMap: Sync Index`
 - `CodeMap: Search Everywhere`
 - `CodeMap: Open Search Panel`
 - `CodeMap: Show Index Info`
@@ -37,12 +38,23 @@ Search panel shortcut:
 - Local index stored in `.codemap/meta.json` and `.codemap/files.jsonl`
 - Progress notification while building the index
 - `.codemapignore` support
+- Startup auto-sync for existing indexes
 - Index info command
 - Clear index command
 
 CodeMap can still read the old `.codemap/index.json` prototype format, but new builds write the split JSONL format.
 
 Language support in this prototype is regex-based. It is intended for fast navigation and common declarations, not complete compiler-grade parsing.
+
+## Index Lifecycle
+
+Run `CodeMap: Build Index` the first time a workspace uses CodeMap.
+
+After that, CodeMap loads the existing `.codemap/` index when the workspace opens. If `codemap.autoSyncOnStartup` is enabled, it will quietly scan for external changes and update the index in the background. This helps after operations such as `git pull`, SVN update, branch switching, or generated code refreshes.
+
+Use `CodeMap: Sync Index` when you want to manually reconcile the index with files on disk without forcing a full rebuild.
+
+Use `CodeMap: Clear Index` followed by `CodeMap: Build Index` when changing broad include/exclude rules or when you want a clean rebuild.
 
 ## Ignore Rules
 
@@ -55,6 +67,8 @@ node_modules/
 .venv/
 dist/
 generated/
+resources/
+assets/
 *.snap
 ```
 

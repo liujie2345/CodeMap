@@ -58,6 +58,14 @@ export interface CodeMapIndexSummary {
   storagePath?: string;
 }
 
+export interface CodeMapSyncResult {
+  index: CodeMapIndex;
+  scannedFiles: number;
+  addedFiles: number;
+  updatedFiles: number;
+  removedFiles: number;
+}
+
 export interface SearchResult {
   kind: CodeMapResultKind;
   label: string;

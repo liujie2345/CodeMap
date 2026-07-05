@@ -14,6 +14,8 @@ const GROUP_LABELS: Record<CodeMapResultKind, string> = {
 };
 
 const GROUP_ORDER: CodeMapResultKind[] = ['class', 'interface', 'type', 'function', 'file', 'text'];
+let backgroundSyncTimer: NodeJS.Timeout | undefined;
+let backgroundSyncRunning = false;
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('CodeMap');
@@ -48,6 +50,9 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('codemap.searchEverywhere', async () => {
       await searchEverywhere(indexer, status);
     }),
+    vscode.commands.registerCommand('codemap.syncIndex', async () => {
+      await syncIndexWithProgress(indexer, status, true);
+    }),
     vscode.commands.registerCommand('codemap.openSearchPanel', async () => {
       await openSearchPanel(indexer, status, context);
     }),
@@ -71,16 +76,25 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   const watcher = vscode.workspace.createFileSystemWatcher(DEFAULT_INCLUDE_GLOB);
+  const ignoreWatcher = vscode.workspace.createFileSystemWatcher('**/.codemapignore');
   context.subscriptions.push(
     watcher,
     watcher.onDidCreate((uri) => indexer.updateFile(uri)),
     watcher.onDidChange((uri) => indexer.updateFile(uri)),
-    watcher.onDidDelete((uri) => indexer.removeFile(uri))
+    watcher.onDidDelete((uri) => indexer.removeFile(uri)),
+    ignoreWatcher,
+    ignoreWatcher.onDidCreate(() => scheduleBackgroundSync(indexer, status)),
+    ignoreWatcher.onDidChange(() => scheduleBackgroundSync(indexer, status)),
+    ignoreWatcher.onDidDelete(() => scheduleBackgroundSync(indexer, status))
   );
 
   void indexer.getIndex().then((index) => {
     if (index) {
       setReadyStatus(status, index);
+      const config = vscode.workspace.getConfiguration('codemap');
+      if (config.get<boolean>('autoSyncOnStartup', true)) {
+        scheduleBackgroundSync(indexer, status);
+      }
     } else {
       status.text = 'CodeMap: no index';
     }
@@ -191,6 +205,59 @@ async function showIndexInfo(indexer: CodeMapIndexer): Promise<void> {
   });
 
   await vscode.window.showTextDocument(document, { preview: true });
+}
+
+async function syncIndexWithProgress(
+  indexer: CodeMapIndexer,
+  status: vscode.StatusBarItem,
+  showSummary: boolean
+): Promise<void> {
+  await withProgress('Syncing CodeMap index', async (progress) => {
+    status.text = 'CodeMap: syncing';
+    try {
+      let lastProcessed = 0;
+      const result = await indexer.syncIndex((state) => {
+        reportBuildProgress(progress, state, lastProcessed);
+        lastProcessed = state.processed;
+      });
+      setReadyStatus(status, result.index);
+      if (showSummary) {
+        vscode.window.showInformationMessage(
+          `CodeMap synced ${result.scannedFiles} files (+${result.addedFiles}, ~${result.updatedFiles}, -${result.removedFiles}).`
+        );
+      }
+    } catch (error) {
+      status.text = 'CodeMap: error';
+      vscode.window.showErrorMessage(getErrorMessage(error));
+    }
+  });
+}
+
+function scheduleBackgroundSync(indexer: CodeMapIndexer, status: vscode.StatusBarItem): void {
+  if (backgroundSyncTimer) {
+    clearTimeout(backgroundSyncTimer);
+  }
+
+  status.text = 'CodeMap: stale';
+  backgroundSyncTimer = setTimeout(() => {
+    if (backgroundSyncRunning) {
+      return;
+    }
+
+    backgroundSyncRunning = true;
+    status.text = 'CodeMap: syncing';
+    void indexer.syncIndex()
+      .then((result) => {
+        setReadyStatus(status, result.index);
+      })
+      .catch((error) => {
+        status.text = 'CodeMap: sync error';
+        console.error(error);
+      })
+      .finally(() => {
+        backgroundSyncRunning = false;
+      });
+  }, 1500);
 }
 
 async function openSearchPanel(

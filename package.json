@@ -2,7 +2,7 @@
   "name": "codemap",
   "displayName": "CodeMap",
   "description": "Fast Search Everywhere for large VS Code workspaces.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "publisher": "codemap",
   "license": "UNLICENSED",
   "engines": {
@@ -15,6 +15,7 @@
     "onCommand:codemap.searchEverywhere",
     "onCommand:codemap.openSearchPanel",
     "onCommand:codemap.buildIndex",
+    "onCommand:codemap.syncIndex",
     "onCommand:codemap.showIndexInfo",
     "onCommand:codemap.clearIndex",
     "onStartupFinished"
@@ -33,6 +34,10 @@
       {
         "command": "codemap.buildIndex",
         "title": "CodeMap: Build Index"
+      },
+      {
+        "command": "codemap.syncIndex",
+        "title": "CodeMap: Sync Index"
       },
       {
         "command": "codemap.showIndexInfo",
@@ -87,7 +92,19 @@
             "**/__pycache__/**",
             "**/.pytest_cache/**",
             "**/.mypy_cache/**",
-            "**/.ruff_cache/**"
+            "**/.ruff_cache/**",
+            "**/assets/**",
+            "**/resources/**",
+            "**/static/**",
+            "**/images/**",
+            "**/textures/**",
+            "**/audio/**",
+            "**/video/**",
+            "**/logs/**",
+            "**/tmp/**",
+            "**/temp/**",
+            "**/vendor/**",
+            "**/generated/**"
           ],
           "items": {
             "type": "string"
@@ -105,6 +122,11 @@
           "default": 80,
           "minimum": 0,
           "description": "Maximum text matches returned for one search."
+        },
+        "codemap.autoSyncOnStartup": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically sync the CodeMap index shortly after opening a workspace."
         }
       }
     }

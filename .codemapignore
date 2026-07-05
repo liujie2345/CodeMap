@@ -13,3 +13,15 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+assets/
+resources/
+static/
+images/
+textures/
+audio/
+video/
+logs/
+tmp/
+temp/
+vendor/
+generated/

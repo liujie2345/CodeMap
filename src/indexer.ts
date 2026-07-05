@@ -6,6 +6,7 @@ import {
   CodeMapIndex,
   CodeMapIndexMeta,
   CodeMapIndexSummary,
+  CodeMapSyncResult,
   CodeMapSymbol,
   CodeMapTextLine
 } from './types';
@@ -45,23 +46,13 @@ export class CodeMapIndexer {
 
     const config = vscode.workspace.getConfiguration('codemap');
     const includeGlobs = config.get<string[]>('includeGlobs', [DEFAULT_INCLUDE_GLOB]);
-    const excludeGlobs = [
-      ...config.get<string[]>('excludeGlobs', []),
-      ...await readCodemapIgnoreGlobs(workspaceFolders)
-    ];
+    const excludeGlobs = await getEffectiveExcludeGlobs(workspaceFolders);
     const maxFileSizeBytes = config.get<number>('maxFileSizeBytes', 1024 * 1024);
 
     const startedAt = Date.now();
     this.output.appendLine(`[CodeMap] Building index for ${workspaceFolders.length} workspace folder(s).`);
 
-    const uris: vscode.Uri[] = [];
-    const excludePattern = excludeGlobs.length > 0 ? `{${excludeGlobs.join(',')}}` : undefined;
-    for (const includeGlob of includeGlobs) {
-      const found = await vscode.workspace.findFiles(includeGlob, excludePattern);
-      uris.push(...found);
-    }
-
-    const uniqueUris = dedupeUris(uris);
+    const uniqueUris = await collectIndexableUris(includeGlobs, excludeGlobs);
     const files: CodeMapFile[] = [];
     for (let index = 0; index < uniqueUris.length; index += 1) {
       const uri = uniqueUris[index];
@@ -106,10 +97,7 @@ export class CodeMapIndexer {
 
     const config = vscode.workspace.getConfiguration('codemap');
     const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
-    const excludeGlobs = [
-      ...config.get<string[]>('excludeGlobs', []),
-      ...await readCodemapIgnoreGlobs(workspaceFolders)
-    ];
+    const excludeGlobs = await getEffectiveExcludeGlobs(workspaceFolders);
     const maxFileSizeBytes = config.get<number>('maxFileSizeBytes', 1024 * 1024);
     const location = getWorkspaceLocation(uri);
     if (!location) {
@@ -129,6 +117,98 @@ export class CodeMapIndexer {
 
     current.createdAt = new Date().toISOString();
     await this.saveIndex(current);
+  }
+
+  async syncIndex(onProgress?: (progress: BuildIndexProgress) => void): Promise<CodeMapSyncResult> {
+    const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+    if (workspaceFolders.length === 0) {
+      throw new Error('Open a workspace folder before syncing a CodeMap index.');
+    }
+
+    const current = await this.getIndex();
+    if (!current) {
+      const index = await this.buildIndex(onProgress);
+      return {
+        index,
+        scannedFiles: index.files.length,
+        addedFiles: index.files.length,
+        updatedFiles: 0,
+        removedFiles: 0
+      };
+    }
+
+    const config = vscode.workspace.getConfiguration('codemap');
+    const includeGlobs = config.get<string[]>('includeGlobs', [DEFAULT_INCLUDE_GLOB]);
+    const excludeGlobs = await getEffectiveExcludeGlobs(workspaceFolders);
+    const maxFileSizeBytes = config.get<number>('maxFileSizeBytes', 1024 * 1024);
+    const uniqueUris = await collectIndexableUris(includeGlobs, excludeGlobs);
+    const existingByKey = new Map(current.files.map((file) => [fileKey(file.workspaceFolder, file.relativePath), file]));
+    const nextFiles: CodeMapFile[] = [];
+    const seenKeys = new Set<string>();
+    let addedFiles = 0;
+    let updatedFiles = 0;
+
+    for (let index = 0; index < uniqueUris.length; index += 1) {
+      const uri = uniqueUris[index];
+      const location = getWorkspaceLocation(uri);
+      if (!location) {
+        continue;
+      }
+
+      onProgress?.({
+        processed: index,
+        total: uniqueUris.length,
+        currentFile: location.relativePath
+      });
+
+      const key = fileKey(location.workspaceFolder, location.relativePath);
+      seenKeys.add(key);
+      const existing = existingByKey.get(key);
+      const stat = await fs.stat(uri.fsPath);
+      if (stat.size > maxFileSizeBytes) {
+        continue;
+      }
+
+      if (existing && existing.size === stat.size && existing.mtimeMs === stat.mtimeMs) {
+        nextFiles.push(existing);
+        continue;
+      }
+
+      const indexedFile = await this.indexFile(uri, maxFileSizeBytes);
+      if (!indexedFile) {
+        continue;
+      }
+
+      nextFiles.push(indexedFile);
+      if (existing) {
+        updatedFiles += 1;
+      } else {
+        addedFiles += 1;
+      }
+    }
+
+    const removedFiles = current.files.filter((file) => !seenKeys.has(fileKey(file.workspaceFolder, file.relativePath))).length;
+    current.files = dedupeFiles(nextFiles);
+    current.createdAt = new Date().toISOString();
+    await this.saveIndex(current);
+    this.index = current;
+
+    onProgress?.({
+      processed: uniqueUris.length,
+      total: uniqueUris.length
+    });
+
+    this.output.appendLine(
+      `[CodeMap] Synced ${uniqueUris.length} files: +${addedFiles}, ~${updatedFiles}, -${removedFiles}.`
+    );
+
+    return {
+      index: current,
+      scannedFiles: uniqueUris.length,
+      addedFiles,
+      updatedFiles,
+      removedFiles
+    };
   }
 
   async getIndexSummary(): Promise<CodeMapIndexSummary | undefined> {
@@ -316,6 +396,25 @@ function getWorkspaceLocation(uri: vscode.Uri): { workspaceFolder: string; relat
     workspaceFolder: folder.uri.fsPath,
     relativePath: path.relative(folder.uri.fsPath, uri.fsPath).replace(/\\/g, '/')
   };
+}
+
+async function getEffectiveExcludeGlobs(workspaceFolders: readonly vscode.WorkspaceFolder[]): Promise<string[]> {
+  const config = vscode.workspace.getConfiguration('codemap');
+  return [
+    ...config.get<string[]>('excludeGlobs', []),
+    ...await readCodemapIgnoreGlobs(workspaceFolders)
+  ];
+}
+
+async function collectIndexableUris(includeGlobs: string[], excludeGlobs: string[]): Promise<vscode.Uri[]> {
+  const uris: vscode.Uri[] = [];
+  const excludePattern = excludeGlobs.length > 0 ? `{${excludeGlobs.join(',')}}` : undefined;
+  for (const includeGlob of includeGlobs) {
+    const found = await vscode.workspace.findFiles(includeGlob, excludePattern);
+    uris.push(...found);
+  }
+
+  return dedupeUris(uris);
 }
 
 function getLanguageFromPath(filePath: string): string {
@@ -563,6 +662,10 @@ function dedupeFiles(files: CodeMapFile[]): CodeMapFile[] {
   }
 
   return deduped;
+}
+
+function fileKey(workspaceFolder: string, relativePath: string): string {
+  return `${workspaceFolder}:${relativePath}`;
 }
 
 function dedupeUris(uris: vscode.Uri[]): vscode.Uri[] {
