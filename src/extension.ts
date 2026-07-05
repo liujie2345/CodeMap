@@ -2,7 +2,11 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { BuildIndexProgress, CodeMapIndexer, DEFAULT_INCLUDE_GLOB } from './indexer';
 import { searchIndex } from './search';
-import { CodeMapResultKind, SearchEverywhereItem, SearchResult } from './types';
+import { CodeMapResultKind, SearchResult } from './types';
+
+interface SearchEverywhereItem extends vscode.QuickPickItem {
+  result?: SearchResult;
+}
 
 const GROUP_LABELS: Record<CodeMapResultKind, string> = {
   class: 'Classes',

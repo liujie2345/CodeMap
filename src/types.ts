@@ -1,5 +1,3 @@
-import * as vscode from 'vscode';
-
 export type CodeMapResultKind = 'class' | 'function' | 'interface' | 'type' | 'file' | 'text';
 
 export interface CodeMapLocation {
@@ -74,8 +72,4 @@ export interface SearchResult {
   score: number;
   location: CodeMapLocation;
   preview?: string;
-}
-
-export interface SearchEverywhereItem extends vscode.QuickPickItem {
-  result?: SearchResult;
 }

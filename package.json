@@ -2,7 +2,7 @@
   "name": "codemap-everywhere",
   "displayName": "CodeMap Everywhere",
   "description": "Fast structured Search Everywhere for large VS Code workspaces and monorepos.",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "publisher": "codemap",
   "license": "UNLICENSED",
   "repository": {
@@ -37,6 +37,9 @@
     "onStartupFinished"
   ],
   "main": "./out/extension.js",
+  "bin": {
+    "codemap": "./out/cli.js"
+  },
   "contributes": {
     "commands": [
       {

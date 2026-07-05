@@ -86,7 +86,7 @@ On macOS:
 - Search Everywhere: `Cmd+Shift+Alt+O`
 - Search Panel: `Cmd+Shift+Alt+M`
 
-## Commands
+## VS Code Commands
 
 - `CodeMap: Build Index`
 - `CodeMap: Sync Index`
@@ -94,6 +94,20 @@ On macOS:
 - `CodeMap: Open Search Panel`
 - `CodeMap: Show Index Info`
 - `CodeMap: Clear Index`
+
+## CLI Preview
+
+CodeMap Everywhere also includes an early CLI for agents, scripts, and terminal workflows:
+
+```bash
+codemap build
+codemap sync
+codemap info
+codemap search UserService
+codemap search create-kubeconfig --kind symbol --json
+```
+
+The CLI reads and writes the same `.codemap/` index format used by the VS Code extension.
 
 ## Index Lifecycle
 
@@ -184,6 +198,14 @@ Package a local VSIX:
 
 ```bash
 npm run vsix
+```
+
+Run the CLI locally after compiling:
+
+```bash
+node out/cli.js build --cwd path/to/project
+node out/cli.js search UserService --cwd path/to/project
+node out/cli.js search UserService --cwd path/to/project --json
 ```
 
 During extension development, open this folder in VS Code and press `F5` to launch an Extension Development Host.
