@@ -4,7 +4,9 @@ Fast structured Search Everywhere for VS Code, built for large codebases and mon
 
 CodeMap Everywhere helps you jump to the right class, function, file, or text match without digging through noisy full-text results. It is designed for projects where VS Code's default search feels too broad and IDEs like PyCharm feel too heavy.
 
-> Demo GIF coming soon.
+> Demo
+> <img width="1372" height="671" alt="POPO_RECORDER_20260706002446" src="https://github.com/user-attachments/assets/b1c8d9fd-210d-4a60-a480-ac7d09d49309" />
+
 
 ## Why CodeMap Everywhere
 
