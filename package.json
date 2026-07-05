@@ -1,10 +1,26 @@
 {
   "name": "codemap",
   "displayName": "CodeMap",
-  "description": "Fast Search Everywhere for large VS Code workspaces.",
-  "version": "0.2.3",
+  "description": "Fast structured Search Everywhere for large VS Code workspaces and monorepos.",
+  "version": "0.2.4",
   "publisher": "codemap",
   "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/liujie2345/CodeMap.git"
+  },
+  "homepage": "https://github.com/liujie2345/CodeMap#readme",
+  "bugs": {
+    "url": "https://github.com/liujie2345/CodeMap/issues"
+  },
+  "keywords": [
+    "search",
+    "navigation",
+    "symbols",
+    "codemap",
+    "monorepo",
+    "large-workspace"
+  ],
   "engines": {
     "vscode": "^1.92.0"
   },

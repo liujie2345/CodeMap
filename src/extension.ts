@@ -438,8 +438,12 @@ function getSearchPanelHtml(webview: vscode.Webview): string {
       --bg: var(--vscode-editor-background);
       --fg: var(--vscode-editor-foreground);
       --row: var(--vscode-list-hoverBackground);
+      --panel: var(--vscode-sideBar-background);
+      --input: var(--vscode-input-background);
+      --input-fg: var(--vscode-input-foreground);
       --active: var(--vscode-button-background);
       --active-fg: var(--vscode-button-foreground);
+      --focus: var(--vscode-focusBorder);
     }
     * { box-sizing: border-box; }
     body {
@@ -449,6 +453,7 @@ function getSearchPanelHtml(webview: vscode.Webview): string {
       color: var(--fg);
       font-family: var(--vscode-font-family);
       font-size: var(--vscode-font-size);
+      line-height: 1.45;
     }
     .shell {
       display: grid;
@@ -456,52 +461,63 @@ function getSearchPanelHtml(webview: vscode.Webview): string {
       height: 100vh;
     }
     .search {
-      padding: 12px 14px 8px;
+      padding: 14px 16px 10px;
+      background: var(--panel);
       border-bottom: 1px solid var(--border);
     }
     input {
       width: 100%;
-      height: 36px;
-      padding: 0 12px;
+      height: 40px;
+      padding: 0 13px;
       border: 1px solid var(--vscode-input-border);
+      border-radius: 4px;
       outline: none;
-      background: var(--vscode-input-background);
-      color: var(--vscode-input-foreground);
-      font: inherit;
+      background: var(--input);
+      color: var(--input-fg);
+      font-family: var(--vscode-font-family);
+      font-size: 14px;
     }
-    input:focus { border-color: var(--vscode-focusBorder); }
+    input:focus {
+      border-color: var(--focus);
+      box-shadow: 0 0 0 1px var(--focus);
+    }
     .tabs {
       display: flex;
-      gap: 6px;
-      padding: 8px 14px;
+      gap: 4px;
+      padding: 9px 16px;
+      background: var(--panel);
       border-bottom: 1px solid var(--border);
       overflow-x: auto;
     }
     button {
-      height: 28px;
-      padding: 0 10px;
+      height: 30px;
+      padding: 0 12px;
       border: 1px solid var(--vscode-button-border, transparent);
+      border-radius: 4px;
       background: var(--vscode-button-secondaryBackground);
       color: var(--vscode-button-secondaryForeground);
-      font: inherit;
+      font-family: var(--vscode-font-family);
+      font-size: 12px;
       cursor: pointer;
     }
+    button:hover { background: var(--row); }
     button.active {
       background: var(--active);
       color: var(--active-fg);
     }
     .results {
       overflow: auto;
-      padding: 6px 0 20px;
+      padding: 8px 0 24px;
     }
     .empty {
-      padding: 28px 16px;
+      padding: 32px 18px;
       color: var(--muted);
+      font-size: 13px;
     }
     .group-title {
       position: sticky;
       top: 0;
-      padding: 8px 14px 5px;
+      padding: 10px 16px 6px;
       background: var(--bg);
       color: var(--muted);
       font-size: 11px;
@@ -511,11 +527,11 @@ function getSearchPanelHtml(webview: vscode.Webview): string {
     }
     .result {
       display: grid;
-      grid-template-columns: 22px minmax(0, 1fr) auto;
-      gap: 8px;
+      grid-template-columns: 32px minmax(0, 1fr) auto;
+      gap: 10px;
       align-items: center;
-      min-height: 36px;
-      padding: 6px 14px;
+      min-height: 48px;
+      padding: 7px 16px;
       cursor: pointer;
     }
     .result:hover { background: var(--row); }
@@ -532,6 +548,8 @@ function getSearchPanelHtml(webview: vscode.Webview): string {
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
+      font-size: 14px;
+      font-weight: 500;
     }
     .path {
       color: var(--muted);
@@ -539,6 +557,7 @@ function getSearchPanelHtml(webview: vscode.Webview): string {
       text-overflow: ellipsis;
       white-space: nowrap;
       max-width: 42vw;
+      font-size: 12px;
     }
     .detail {
       grid-column: 2 / 4;
@@ -547,11 +566,24 @@ function getSearchPanelHtml(webview: vscode.Webview): string {
       text-overflow: ellipsis;
       white-space: nowrap;
       font-size: 12px;
+      opacity: 0.92;
     }
     .hint {
-      margin-top: 7px;
+      margin-top: 8px;
       color: var(--muted);
       font-size: 12px;
+    }
+    .kind {
+      display: inline-grid;
+      place-items: center;
+      width: 24px;
+      height: 24px;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--muted);
+      background: var(--panel);
+      font-size: 11px;
+      font-weight: 600;
     }
   </style>
 </head>
@@ -661,7 +693,7 @@ function getSearchPanelHtml(webview: vscode.Webview): string {
           const row = document.createElement('div');
           row.className = 'result';
           row.dataset.resultIndex = String(flatIndex);
-          row.innerHTML = '<div>' + icon(group.kind) + '</div>' +
+          row.innerHTML = '<div class="kind">' + icon(group.kind) + '</div>' +
             '<div class="name"></div>' +
             '<div class="path"></div>' +
             '<div class="detail"></div>';

@@ -1,8 +1,8 @@
 # CodeMap
 
-CodeMap is a VS Code extension that adds fast Search Everywhere navigation for large workspaces.
+CodeMap is a VS Code extension that adds fast structured Search Everywhere navigation for large workspaces and monorepos.
 
-Version `0.2.3` focuses on fast, basic symbol navigation across common project languages.
+Version `0.2.4` focuses on fast, basic symbol navigation across common project languages.
 
 ## Commands
 
