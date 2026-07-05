@@ -1,3 +1,3 @@
-CodeMap private prototype.
+CodeMap Everywhere private prototype.
 
 All rights reserved unless a separate license is provided by the project owner.

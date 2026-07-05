@@ -1,12 +1,12 @@
-# CodeMap
+# CodeMap Everywhere
 
 Fast structured Search Everywhere for VS Code, built for large codebases and monorepos.
 
-CodeMap helps you jump to the right class, function, file, or text match without digging through noisy full-text results. It is designed for projects where VS Code's default search feels too broad and IDEs like PyCharm feel too heavy.
+CodeMap Everywhere helps you jump to the right class, function, file, or text match without digging through noisy full-text results. It is designed for projects where VS Code's default search feels too broad and IDEs like PyCharm feel too heavy.
 
 > Demo GIF coming soon.
 
-## Why CodeMap
+## Why CodeMap Everywhere
 
 VS Code search is great for text, but large projects often need a more code-aware workflow:
 
@@ -16,7 +16,7 @@ VS Code search is great for text, but large projects often need a more code-awar
 - Support large projects, monorepos, legacy codebases, and game/editor projects.
 - Stay local-first with no cloud dependency.
 
-If you want a Search Everywhere experience closer to JetBrains IDEs, but inside VS Code, CodeMap is the experiment.
+If you want a Search Everywhere experience closer to JetBrains IDEs, but inside VS Code, CodeMap Everywhere is the experiment.
 
 ## Features
 
@@ -33,7 +33,7 @@ If you want a Search Everywhere experience closer to JetBrains IDEs, but inside 
 
 ## Supported Languages
 
-CodeMap currently provides regex-based symbol extraction for common declarations in:
+CodeMap Everywhere currently provides regex-based symbol extraction for common declarations in:
 
 - TypeScript / JavaScript
 - Python
@@ -95,9 +95,9 @@ On macOS:
 
 ## Index Lifecycle
 
-Run `CodeMap: Build Index` the first time a workspace uses CodeMap.
+Run `CodeMap: Build Index` the first time a workspace uses CodeMap Everywhere.
 
-After that, CodeMap loads the existing `.codemap/` index when the workspace opens. If `codemap.autoSyncOnStartup` is enabled, it quietly scans for external changes and updates the index in the background.
+After that, CodeMap Everywhere loads the existing `.codemap/` index when the workspace opens. If `codemap.autoSyncOnStartup` is enabled, it quietly scans for external changes and updates the index in the background.
 
 Use `CodeMap: Sync Index` when you want to reconcile the index with files on disk without forcing a full rebuild.
 
@@ -105,7 +105,7 @@ Use `CodeMap: Clear Index` followed by `CodeMap: Build Index` when changing broa
 
 ## Ignoring Large Folders
 
-CodeMap only scans supported code file extensions by default, so assets like PNGs, models, audio, and video files are not read as source files. Still, large resource folders can contain scripts or create unnecessary traversal cost.
+CodeMap Everywhere only scans supported code file extensions by default, so assets like PNGs, models, audio, and video files are not read as source files. Still, large resource folders can contain scripts or create unnecessary traversal cost.
 
 Add a `.codemapignore` file at the workspace root:
 
@@ -144,7 +144,7 @@ New indexes are stored as:
 .codemap/files.jsonl
 ```
 
-CodeMap can still read the old `.codemap/index.json` prototype format.
+CodeMap Everywhere can still read the old `.codemap/index.json` prototype format.
 
 The current storage is good enough for early testing, but very large projects may eventually need a stronger backend. Planned directions include SQLite, sharded indexes, worker-based indexing, and more language-aware parsers.
 
@@ -185,4 +185,3 @@ npm run vsix
 ```
 
 During extension development, open this folder in VS Code and press `F5` to launch an Extension Development Host.
-
