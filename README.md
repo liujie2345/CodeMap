@@ -157,19 +157,20 @@ This is especially useful for game projects, editor projects, and monorepos.
 
 ## Large Workspace Notes
 
-For very large workspaces, CodeMap keeps symbol indexing complete but limits stored text lines by default:
+For very large workspaces, CodeMap keeps symbol indexing complete and disables stored text lines by default:
 
 - `codemap.maxTextLinesPerFile`: `200`
-- `codemap.maxTotalTextLines`: `200000`
-- `codemap.indexTextLines`: `true`
+- `codemap.maxTotalTextLines`: `0`
+- `codemap.indexTextLines`: `false`
 
-If you only need class/function/file navigation, you can disable text indexing:
+If you want text search, enable it explicitly:
 
 ```json
-"codemap.indexTextLines": false
+"codemap.indexTextLines": true,
+"codemap.maxTotalTextLines": 200000
 ```
 
-This keeps the index much smaller while preserving symbol and file search.
+The default keeps the index much smaller while preserving symbol and file search.
 
 ## Tested On
 

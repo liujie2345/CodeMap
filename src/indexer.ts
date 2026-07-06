@@ -13,7 +13,7 @@ import {
 
 const INDEX_VERSION = 1;
 const DEFAULT_TEXT_LINE_LIMIT = 200;
-const DEFAULT_TOTAL_TEXT_LINE_LIMIT = 200000;
+const DEFAULT_TOTAL_TEXT_LINE_LIMIT = 0;
 export const DEFAULT_INCLUDE_GLOB = '**/*.{ts,tsx,js,jsx,mjs,cjs,py,lua,java,kt,kts,go,rs,cs,cpp,cxx,cc,c,h,hpp,php,rb,swift,dart,vue,svelte,sh,bash,zsh,ps1}';
 
 export interface BuildIndexProgress {
@@ -49,7 +49,7 @@ export class CodeMapIndexer {
     const includeGlobs = config.get<string[]>('includeGlobs', [DEFAULT_INCLUDE_GLOB]);
     const excludeGlobs = await getEffectiveExcludeGlobs(workspaceFolders);
     const maxFileSizeBytes = config.get<number>('maxFileSizeBytes', 1024 * 1024);
-    const indexTextLines = config.get<boolean>('indexTextLines', true);
+    const indexTextLines = config.get<boolean>('indexTextLines', false);
     const maxTextLinesPerFile = indexTextLines ? config.get<number>('maxTextLinesPerFile', DEFAULT_TEXT_LINE_LIMIT) : 0;
     let remainingTextLines = indexTextLines ? config.get<number>('maxTotalTextLines', DEFAULT_TOTAL_TEXT_LINE_LIMIT) : 0;
 
@@ -105,7 +105,7 @@ export class CodeMapIndexer {
     const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
     const excludeGlobs = await getEffectiveExcludeGlobs(workspaceFolders);
     const maxFileSizeBytes = config.get<number>('maxFileSizeBytes', 1024 * 1024);
-    const indexTextLines = config.get<boolean>('indexTextLines', true);
+    const indexTextLines = config.get<boolean>('indexTextLines', false);
     const textLineLimit = indexTextLines ? config.get<number>('maxTextLinesPerFile', DEFAULT_TEXT_LINE_LIMIT) : 0;
     const location = getWorkspaceLocation(uri);
     if (!location) {
@@ -149,7 +149,7 @@ export class CodeMapIndexer {
     const includeGlobs = config.get<string[]>('includeGlobs', [DEFAULT_INCLUDE_GLOB]);
     const excludeGlobs = await getEffectiveExcludeGlobs(workspaceFolders);
     const maxFileSizeBytes = config.get<number>('maxFileSizeBytes', 1024 * 1024);
-    const indexTextLines = config.get<boolean>('indexTextLines', true);
+    const indexTextLines = config.get<boolean>('indexTextLines', false);
     const maxTextLinesPerFile = indexTextLines ? config.get<number>('maxTextLinesPerFile', DEFAULT_TEXT_LINE_LIMIT) : 0;
     let remainingTextLines = indexTextLines ? config.get<number>('maxTotalTextLines', DEFAULT_TOTAL_TEXT_LINE_LIMIT) : 0;
     const uniqueUris = await collectIndexableUris(includeGlobs, excludeGlobs);
@@ -327,11 +327,11 @@ export class CodeMapIndexer {
         return undefined;
       }
 
-      const files = filesRaw
+      const files = trimLoadedTextLines(filesRaw
         .split(/\r?\n/)
         .map((line) => line.trim())
         .filter(Boolean)
-        .map((line) => JSON.parse(line) as CodeMapFile);
+        .map((line) => JSON.parse(line) as CodeMapFile));
 
       return {
         version: INDEX_VERSION,
@@ -351,6 +351,7 @@ export class CodeMapIndexer {
       if (parsed.version !== INDEX_VERSION) {
         return undefined;
       }
+      parsed.files = trimLoadedTextLines(parsed.files);
       return parsed;
     } catch {
       return undefined;
@@ -866,4 +867,20 @@ function countLanguages(files: CodeMapFile[]): Record<string, number> {
     counts[file.language] = (counts[file.language] ?? 0) + 1;
   }
   return counts;
+}
+
+function trimLoadedTextLines(files: CodeMapFile[]): CodeMapFile[] {
+  const config = vscode.workspace.getConfiguration('codemap');
+  const indexTextLines = config.get<boolean>('indexTextLines', false);
+  if (!indexTextLines) {
+    return files.map((file) => ({ ...file, textLines: [] }));
+  }
+
+  const perFileLimit = config.get<number>('maxTextLinesPerFile', DEFAULT_TEXT_LINE_LIMIT);
+  let remaining = config.get<number>('maxTotalTextLines', DEFAULT_TOTAL_TEXT_LINE_LIMIT);
+  return files.map((file) => {
+    const textLines = file.textLines.slice(0, Math.min(perFileLimit, remaining));
+    remaining = Math.max(0, remaining - textLines.length);
+    return { ...file, textLines };
+  });
 }

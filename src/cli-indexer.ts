@@ -12,7 +12,7 @@ export const CLI_DEFAULT_INCLUDE_EXTENSIONS = new Set([
 ]);
 
 const DEFAULT_TEXT_LINE_LIMIT = 200;
-const DEFAULT_TOTAL_TEXT_LINE_LIMIT = 200000;
+const DEFAULT_TOTAL_TEXT_LINE_LIMIT = 0;
 const DEFAULT_MAX_FILE_SIZE_BYTES = 1024 * 1024;
 const DEFAULT_EXCLUDED_DIRS = new Set([
   '.git', '.codemap', 'node_modules', 'dist', 'build', 'coverage',
