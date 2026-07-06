@@ -2,7 +2,7 @@
   "name": "codemap-everywhere",
   "displayName": "CodeMap Everywhere",
   "description": "Fast structured Search Everywhere for large VS Code workspaces and monorepos.",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "publisher": "codemap",
   "license": "UNLICENSED",
   "repository": {
@@ -170,7 +170,7 @@
   "scripts": {
     "compile": "tsc -p ./",
     "package:cli": "npm run compile && powershell -ExecutionPolicy Bypass -File scripts/package-cli.ps1",
-    "smoke": "npm run compile && node scripts/smoke-search-ranking.js",
+    "smoke": "npm run compile && node scripts/smoke-search-ranking.js && node scripts/smoke-symbol-extraction.js",
     "watch": "tsc -watch -p ./",
     "vsix": "vsce package",
     "vscode:prepublish": "npm run compile"

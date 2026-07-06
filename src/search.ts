@@ -10,39 +10,63 @@ const KIND_WEIGHT: Record<CodeMapResultKind, number> = {
   text: 120
 };
 
-export function searchIndex(index: CodeMapIndex, rawQuery: string, maxTextMatches: number): SearchResult[] {
+export type SearchScope = 'all' | 'symbols' | 'classes' | 'functions' | 'files' | 'text';
+
+export interface SearchIndexOptions {
+  scope?: SearchScope;
+  maxTextMatches?: number;
+  limit?: number;
+}
+
+export function searchIndex(index: CodeMapIndex, rawQuery: string, maxTextMatchesOrOptions: number | SearchIndexOptions = {}): SearchResult[] {
   const query = normalizeQuery(rawQuery);
   if (!query) {
     return [];
   }
 
+  const options = typeof maxTextMatchesOrOptions === 'number'
+    ? { maxTextMatches: maxTextMatchesOrOptions }
+    : maxTextMatchesOrOptions;
+  const scope = options.scope ?? 'all';
+  const maxTextMatches = options.maxTextMatches ?? 80;
+  const limit = options.limit ?? 150;
+  const includeFiles = scope === 'all' || scope === 'files';
+  const includeSymbols = scope === 'all' || scope === 'symbols' || scope === 'classes' || scope === 'functions';
+  const includeText = scope === 'all' || scope === 'text';
+
   const results: SearchResult[] = [];
   let textMatches = 0;
 
   for (const file of index.files) {
-    const fileResult = matchFile(file, query);
+    const fileResult = includeFiles ? matchFile(file, query) : undefined;
     if (fileResult) {
       results.push(fileResult);
     }
 
-    for (const symbol of file.symbols) {
-      const symbolScore = scoreCandidate(symbol.name, query);
-      if (symbolScore <= 0) {
-        continue;
-      }
+    if (includeSymbols) {
+      for (const symbol of file.symbols) {
+        if (!symbolInScope(symbol.kind, scope)) {
+          continue;
+        }
 
-      results.push({
-        kind: symbol.kind,
-        label: symbol.name,
-        description: symbol.location.relativePath,
-        detail: symbol.signature,
-        score: KIND_WEIGHT[symbol.kind] + symbolScore,
-        location: symbol.location,
-        preview: symbol.signature
-      });
+        const symbolScore = scoreCandidate(symbol.name, query);
+        if (symbolScore <= 0) {
+          continue;
+        }
+
+        results.push({
+          kind: symbol.kind,
+          label: symbol.name,
+          description: symbol.location.relativePath,
+          detail: symbol.signature,
+          score: KIND_WEIGHT[symbol.kind] + symbolScore,
+          location: symbol.location,
+          preview: symbol.signature
+        });
+      }
     }
 
-    if (textMatches < maxTextMatches) {
+    if (includeText && textMatches < maxTextMatches) {
       for (const line of file.textLines) {
         const lineScore = scoreCandidate(line.text, query);
         if (lineScore <= 0) {
@@ -74,7 +98,19 @@ export function searchIndex(index: CodeMapIndex, rawQuery: string, maxTextMatche
 
   return dedupeResults(results)
     .sort((left, right) => right.score - left.score || left.label.localeCompare(right.label))
-    .slice(0, 150);
+    .slice(0, limit);
+}
+
+function symbolInScope(kind: CodeMapResultKind, scope: SearchScope): boolean {
+  if (scope === 'classes') {
+    return kind === 'class' || kind === 'interface' || kind === 'type';
+  }
+
+  if (scope === 'functions') {
+    return kind === 'function';
+  }
+
+  return kind === 'class' || kind === 'interface' || kind === 'type' || kind === 'function';
 }
 
 function matchFile(file: CodeMapFile, query: NormalizedQuery): SearchResult | undefined {

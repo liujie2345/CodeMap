@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { buildCliIndex, loadCliIndex, summarizeIndex, syncCliIndex } from './cli-indexer';
-import { searchIndex } from './search';
+import { SearchScope, searchIndex } from './search';
 import { SearchResult } from './types';
 
 interface CliArgs {
@@ -62,7 +62,11 @@ async function main(): Promise<void> {
       if (!index) {
         throw new Error('No CodeMap index found. Run `codemap build` first.');
       }
-      const results = filterKind(searchIndex(index, args.query, 80), args.kind).slice(0, args.limit);
+      const results = searchIndex(index, args.query, {
+        scope: kindToSearchScope(args.kind),
+        maxTextMatches: 80,
+        limit: args.limit
+      });
       output(args, results, formatResults(results));
       return;
     }
@@ -100,16 +104,32 @@ function parseArgs(argv: string[]): CliArgs {
   return args;
 }
 
-function filterKind(results: SearchResult[], kind?: string): SearchResult[] {
+function kindToSearchScope(kind?: string): SearchScope {
   if (!kind) {
-    return results;
+    return 'all';
   }
 
   if (kind === 'symbol' || kind === 'symbols') {
-    return results.filter((result) => ['class', 'interface', 'type', 'function'].includes(result.kind));
+    return 'symbols';
   }
 
-  return results.filter((result) => result.kind === kind);
+  if (kind === 'class' || kind === 'classes') {
+    return 'classes';
+  }
+
+  if (kind === 'function' || kind === 'functions') {
+    return 'functions';
+  }
+
+  if (kind === 'file' || kind === 'files') {
+    return 'files';
+  }
+
+  if (kind === 'text') {
+    return 'text';
+  }
+
+  return 'all';
 }
 
 function output(args: CliArgs, value: unknown, text: string): void {

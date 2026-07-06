@@ -256,6 +256,10 @@ function extractTextLines(content: string, limit: number): CodeMapTextLine[] {
 }
 
 function extractCliSymbols(content: string, workspaceFolder: string, relativePath: string, language: string): CodeMapSymbol[] {
+  if (language === 'python') {
+    return extractPythonSymbols(content, workspaceFolder, relativePath);
+  }
+
   const symbols: CodeMapSymbol[] = [];
   const lines = content.split(/\r?\n/);
 
@@ -282,6 +286,54 @@ function extractCliSymbols(content: string, workspaceFolder: string, relativePat
   return symbols;
 }
 
+function extractPythonSymbols(content: string, workspaceFolder: string, relativePath: string): CodeMapSymbol[] {
+  const symbols: CodeMapSymbol[] = [];
+  const lines = content.split(/\r?\n/);
+  const classStack: Array<{ name: string; indent: number }> = [];
+
+  for (let line = 0; line < lines.length; line += 1) {
+    const rawLine = lines[line];
+    const trimmed = rawLine.trim();
+    if (!trimmed || isLikelyComment(trimmed)) {
+      continue;
+    }
+
+    const character = rawLine.search(/\S|$/);
+    while (classStack.length > 0 && character <= classStack[classStack.length - 1].indent) {
+      classStack.pop();
+    }
+
+    const classMatch = trimmed.match(/^class\s+([A-Za-z_][\w]*)\s*(?:\(|:)/);
+    if (classMatch) {
+      const name = classMatch[1];
+      classStack.push({ name, indent: character });
+      symbols.push({
+        kind: 'class',
+        name,
+        location: { workspaceFolder, relativePath, line, character },
+        signature: trimmed.slice(0, 240)
+      });
+      continue;
+    }
+
+    const functionMatch = trimmed.match(/^(?:async\s+)?def\s+([A-Za-z_][\w]*)\s*\(/);
+    if (functionMatch) {
+      const rawName = functionMatch[1];
+      const owner = classStack[classStack.length - 1];
+      const name = owner && character > owner.indent ? `${owner.name}.${rawName}` : rawName;
+      symbols.push({
+        kind: 'function',
+        name,
+        containerName: owner?.name,
+        location: { workspaceFolder, relativePath, line, character },
+        signature: trimmed.slice(0, 240)
+      });
+    }
+  }
+
+  return symbols;
+}
+
 type Declaration = { kind: CodeMapSymbol['kind']; match: RegExpMatchArray | null };
 
 function getDeclarations(trimmed: string, language: string): Declaration[] {
@@ -300,7 +352,9 @@ function getDeclarations(trimmed: string, language: string): Declaration[] {
     return [
       { kind: 'function', match: trimmed.match(/^(?:local\s+)?function\s+([A-Za-z_][\w.:-]*)\s*\(/) },
       { kind: 'function', match: trimmed.match(/^([A-Za-z_][\w.:-]*)\s*=\s*function\s*\(/) },
-      { kind: 'class', match: trimmed.match(/^local\s+([A-Za-z_][\w]*)\s*=\s*\{\s*\}/) }
+      { kind: 'function', match: trimmed.match(/^[A-Za-z_][\w.]*\[['"]([^'"]+)['"]\]\s*=\s*function\s*\(/) },
+      { kind: 'class', match: trimmed.match(/^(?:local\s+)?([A-Za-z_][\w]*)\s*=\s*\{\s*\}/) },
+      { kind: 'class', match: trimmed.match(/^local\s+([A-Za-z_][\w]*)\s*=\s*setmetatable\s*\(/) }
     ];
   }
 

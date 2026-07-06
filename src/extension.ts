@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { BuildIndexProgress, CodeMapIndexer, DEFAULT_INCLUDE_GLOB } from './indexer';
-import { searchIndex } from './search';
+import { SearchScope, searchIndex } from './search';
 import { CodeMapResultKind, SearchResult } from './types';
 
 interface SearchEverywhereItem extends vscode.QuickPickItem {
@@ -154,7 +154,7 @@ async function searchEverywhere(indexer: CodeMapIndexer, status: vscode.StatusBa
   const updateItems = debounce((query: string) => {
     const config = vscode.workspace.getConfiguration('codemap');
     const maxTextMatches = config.get<number>('maxTextMatches', 80);
-    const results = searchIndex(activeIndex, query, maxTextMatches);
+    const results = searchIndex(activeIndex, query, { scope: 'all', maxTextMatches });
     quickPick.items = toQuickPickItems(results);
   }, 70);
 
@@ -315,7 +315,11 @@ async function openSearchPanel(
     if (message.type === 'search') {
       const config = vscode.workspace.getConfiguration('codemap');
       const maxTextMatches = config.get<number>('maxTextMatches', 80);
-      const results = filterPanelResults(searchIndex(activeIndex, message.query, maxTextMatches), message.mode);
+      const results = searchIndex(activeIndex, message.query, {
+        scope: panelModeToSearchScope(message.mode),
+        maxTextMatches,
+        limit: 150
+      });
       await panel.webview.postMessage({
         type: 'results',
         query: message.query,
@@ -397,20 +401,20 @@ type PanelMessage =
   | { type: 'search'; query: string; mode: PanelMode }
   | { type: 'open'; result: SearchResult };
 
-function filterPanelResults(results: SearchResult[], mode: PanelMode): SearchResult[] {
+function panelModeToSearchScope(mode: PanelMode): SearchScope {
   switch (mode) {
     case 'symbols':
-      return results.filter((result) => ['class', 'interface', 'type', 'function'].includes(result.kind));
+      return 'symbols';
     case 'classes':
-      return results.filter((result) => ['class', 'interface', 'type'].includes(result.kind));
+      return 'classes';
     case 'functions':
-      return results.filter((result) => result.kind === 'function');
+      return 'functions';
     case 'files':
-      return results.filter((result) => result.kind === 'file');
+      return 'files';
     case 'text':
-      return results.filter((result) => result.kind === 'text');
+      return 'text';
     case 'all':
-      return results;
+      return 'all';
   }
 }
 

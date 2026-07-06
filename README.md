@@ -26,7 +26,9 @@ If you want a Search Everywhere experience closer to JetBrains IDEs, but inside 
 - QuickPick-based Search Everywhere command.
 - Classes, functions, interfaces, types, files, and text search.
 - Symbols-first ranking so definitions appear before noisy text matches.
+- Mode-aware search so Symbols, Files, and Text tabs avoid unnecessary scans.
 - Separator-aware exact matching, such as `create-kubeconfig` ranking above similar fuzzy matches.
+- Improved Python class method and Lua module function extraction.
 - Local index stored under `.codemap/`.
 - Startup auto-sync for existing indexes.
 - Manual sync after `git pull`, SVN update, branch switching, or external file changes.
