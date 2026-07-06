@@ -11,7 +11,8 @@ export const CLI_DEFAULT_INCLUDE_EXTENSIONS = new Set([
   '.sh', '.bash', '.zsh', '.ps1'
 ]);
 
-const DEFAULT_TEXT_LINE_LIMIT = 2000;
+const DEFAULT_TEXT_LINE_LIMIT = 200;
+const DEFAULT_TOTAL_TEXT_LINE_LIMIT = 200000;
 const DEFAULT_MAX_FILE_SIZE_BYTES = 1024 * 1024;
 const DEFAULT_EXCLUDED_DIRS = new Set([
   '.git', '.codemap', 'node_modules', 'dist', 'build', 'coverage',
@@ -40,11 +41,13 @@ export async function buildCliIndex(options: CliIndexOptions): Promise<CodeMapIn
   const ignoreRules = await readCodemapIgnore(root);
   const files = await collectCodeFiles(root, ignoreRules);
   const indexedFiles: CodeMapFile[] = [];
+  let remainingTextLines = DEFAULT_TOTAL_TEXT_LINE_LIMIT;
 
   for (const filePath of files) {
-    const indexed = await indexCliFile(root, filePath, maxFileSizeBytes);
+    const indexed = await indexCliFile(root, filePath, maxFileSizeBytes, Math.min(DEFAULT_TEXT_LINE_LIMIT, remainingTextLines));
     if (indexed) {
       indexedFiles.push(indexed);
+      remainingTextLines = Math.max(0, remainingTextLines - indexed.textLines.length);
     }
   }
 
@@ -78,6 +81,7 @@ export async function syncCliIndex(options: CliIndexOptions): Promise<CliSyncRes
   const existingByPath = new Map(current.files.map((file) => [file.relativePath, file]));
   const seen = new Set<string>();
   const nextFiles: CodeMapFile[] = [];
+  let remainingTextLines = DEFAULT_TOTAL_TEXT_LINE_LIMIT;
   let addedFiles = 0;
   let updatedFiles = 0;
 
@@ -88,16 +92,22 @@ export async function syncCliIndex(options: CliIndexOptions): Promise<CliSyncRes
     const existing = existingByPath.get(relativePath);
 
     if (existing && existing.size === stat.size && existing.mtimeMs === stat.mtimeMs) {
-      nextFiles.push(existing);
+      const preserved = {
+        ...existing,
+        textLines: existing.textLines.slice(0, Math.min(DEFAULT_TEXT_LINE_LIMIT, remainingTextLines))
+      };
+      nextFiles.push(preserved);
+      remainingTextLines = Math.max(0, remainingTextLines - preserved.textLines.length);
       continue;
     }
 
-    const indexed = await indexCliFile(root, filePath, maxFileSizeBytes);
+    const indexed = await indexCliFile(root, filePath, maxFileSizeBytes, Math.min(DEFAULT_TEXT_LINE_LIMIT, remainingTextLines));
     if (!indexed) {
       continue;
     }
 
     nextFiles.push(indexed);
+    remainingTextLines = Math.max(0, remainingTextLines - indexed.textLines.length);
     if (existing) {
       updatedFiles += 1;
     } else {
@@ -206,7 +216,7 @@ async function walk(root: string, currentDir: string, ignoreRules: string[], fil
   }
 }
 
-async function indexCliFile(root: string, filePath: string, maxFileSizeBytes: number): Promise<CodeMapFile | undefined> {
+async function indexCliFile(root: string, filePath: string, maxFileSizeBytes: number, textLineLimit: number): Promise<CodeMapFile | undefined> {
   const stat = await fs.stat(filePath);
   if (stat.size > maxFileSizeBytes) {
     return undefined;
@@ -229,14 +239,18 @@ async function indexCliFile(root: string, filePath: string, maxFileSizeBytes: nu
     size: stat.size,
     mtimeMs: stat.mtimeMs,
     symbols: extractCliSymbols(content, root, relativePath, language),
-    textLines: extractTextLines(content)
+    textLines: extractTextLines(content, textLineLimit)
   };
 }
 
-function extractTextLines(content: string): CodeMapTextLine[] {
+function extractTextLines(content: string, limit: number): CodeMapTextLine[] {
+  if (limit <= 0) {
+    return [];
+  }
+
   return content
     .split(/\r?\n/)
-    .slice(0, DEFAULT_TEXT_LINE_LIMIT)
+    .slice(0, limit)
     .map((text, index) => ({ text: text.trim(), line: index }))
     .filter((line) => line.text.length > 0 && line.text.length <= 500);
 }

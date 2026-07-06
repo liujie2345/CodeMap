@@ -2,7 +2,7 @@
   "name": "codemap-everywhere",
   "displayName": "CodeMap Everywhere",
   "description": "Fast structured Search Everywhere for large VS Code workspaces and monorepos.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "codemap",
   "license": "UNLICENSED",
   "repository": {
@@ -141,6 +141,23 @@
           "default": 80,
           "minimum": 0,
           "description": "Maximum text matches returned for one search."
+        },
+        "codemap.indexTextLines": {
+          "type": "boolean",
+          "default": true,
+          "description": "Index source text lines for text search. Symbol, file, class, and function search still work when this is disabled."
+        },
+        "codemap.maxTextLinesPerFile": {
+          "type": "number",
+          "default": 200,
+          "minimum": 0,
+          "description": "Maximum text lines stored per indexed file."
+        },
+        "codemap.maxTotalTextLines": {
+          "type": "number",
+          "default": 200000,
+          "minimum": 0,
+          "description": "Maximum total text lines stored in the workspace index."
         },
         "codemap.autoSyncOnStartup": {
           "type": "boolean",

@@ -34,8 +34,13 @@ async function main(): Promise<void> {
     case 'sync': {
       const started = Date.now();
       const result = await syncCliIndex({ root: args.cwd });
+      const summary = summarizeIndex(args.cwd, result.index);
       output(args, {
-        ...result,
+        scannedFiles: result.scannedFiles,
+        addedFiles: result.addedFiles,
+        updatedFiles: result.updatedFiles,
+        removedFiles: result.removedFiles,
+        summary,
         durationMs: Date.now() - started
       }, `Synced ${result.scannedFiles} files (+${result.addedFiles}, ~${result.updatedFiles}, -${result.removedFiles}) in ${Date.now() - started}ms.`);
       return;

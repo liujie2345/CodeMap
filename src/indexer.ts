@@ -12,7 +12,8 @@ import {
 } from './types';
 
 const INDEX_VERSION = 1;
-const DEFAULT_TEXT_LINE_LIMIT = 2000;
+const DEFAULT_TEXT_LINE_LIMIT = 200;
+const DEFAULT_TOTAL_TEXT_LINE_LIMIT = 200000;
 export const DEFAULT_INCLUDE_GLOB = '**/*.{ts,tsx,js,jsx,mjs,cjs,py,lua,java,kt,kts,go,rs,cs,cpp,cxx,cc,c,h,hpp,php,rb,swift,dart,vue,svelte,sh,bash,zsh,ps1}';
 
 export interface BuildIndexProgress {
@@ -48,6 +49,9 @@ export class CodeMapIndexer {
     const includeGlobs = config.get<string[]>('includeGlobs', [DEFAULT_INCLUDE_GLOB]);
     const excludeGlobs = await getEffectiveExcludeGlobs(workspaceFolders);
     const maxFileSizeBytes = config.get<number>('maxFileSizeBytes', 1024 * 1024);
+    const indexTextLines = config.get<boolean>('indexTextLines', true);
+    const maxTextLinesPerFile = indexTextLines ? config.get<number>('maxTextLinesPerFile', DEFAULT_TEXT_LINE_LIMIT) : 0;
+    let remainingTextLines = indexTextLines ? config.get<number>('maxTotalTextLines', DEFAULT_TOTAL_TEXT_LINE_LIMIT) : 0;
 
     const startedAt = Date.now();
     this.output.appendLine(`[CodeMap] Building index for ${workspaceFolders.length} workspace folder(s).`);
@@ -62,9 +66,11 @@ export class CodeMapIndexer {
         currentFile: getWorkspaceLocation(uri)?.relativePath
       });
 
-      const indexedFile = await this.indexFile(uri, maxFileSizeBytes);
+      const textLineLimit = Math.min(maxTextLinesPerFile, remainingTextLines);
+      const indexedFile = await this.indexFile(uri, maxFileSizeBytes, textLineLimit);
       if (indexedFile) {
         files.push(indexedFile);
+        remainingTextLines = Math.max(0, remainingTextLines - indexedFile.textLines.length);
       }
     }
 
@@ -99,13 +105,15 @@ export class CodeMapIndexer {
     const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
     const excludeGlobs = await getEffectiveExcludeGlobs(workspaceFolders);
     const maxFileSizeBytes = config.get<number>('maxFileSizeBytes', 1024 * 1024);
+    const indexTextLines = config.get<boolean>('indexTextLines', true);
+    const textLineLimit = indexTextLines ? config.get<number>('maxTextLinesPerFile', DEFAULT_TEXT_LINE_LIMIT) : 0;
     const location = getWorkspaceLocation(uri);
     if (!location) {
       return;
     }
     const indexedFile = isRelativePathIgnored(location.relativePath, excludeGlobs)
       ? undefined
-      : await this.indexFile(uri, maxFileSizeBytes);
+      : await this.indexFile(uri, maxFileSizeBytes, textLineLimit);
 
     current.files = current.files.filter((file) => {
       return file.workspaceFolder !== location.workspaceFolder || file.relativePath !== location.relativePath;
@@ -141,6 +149,9 @@ export class CodeMapIndexer {
     const includeGlobs = config.get<string[]>('includeGlobs', [DEFAULT_INCLUDE_GLOB]);
     const excludeGlobs = await getEffectiveExcludeGlobs(workspaceFolders);
     const maxFileSizeBytes = config.get<number>('maxFileSizeBytes', 1024 * 1024);
+    const indexTextLines = config.get<boolean>('indexTextLines', true);
+    const maxTextLinesPerFile = indexTextLines ? config.get<number>('maxTextLinesPerFile', DEFAULT_TEXT_LINE_LIMIT) : 0;
+    let remainingTextLines = indexTextLines ? config.get<number>('maxTotalTextLines', DEFAULT_TOTAL_TEXT_LINE_LIMIT) : 0;
     const uniqueUris = await collectIndexableUris(includeGlobs, excludeGlobs);
     const existingByKey = new Map(current.files.map((file) => [fileKey(file.workspaceFolder, file.relativePath), file]));
     const nextFiles: CodeMapFile[] = [];
@@ -170,16 +181,23 @@ export class CodeMapIndexer {
       }
 
       if (existing && existing.size === stat.size && existing.mtimeMs === stat.mtimeMs) {
-        nextFiles.push(existing);
+        const preserved = {
+          ...existing,
+          textLines: existing.textLines.slice(0, Math.min(maxTextLinesPerFile, remainingTextLines))
+        };
+        nextFiles.push(preserved);
+        remainingTextLines = Math.max(0, remainingTextLines - preserved.textLines.length);
         continue;
       }
 
-      const indexedFile = await this.indexFile(uri, maxFileSizeBytes);
+      const textLineLimit = Math.min(maxTextLinesPerFile, remainingTextLines);
+      const indexedFile = await this.indexFile(uri, maxFileSizeBytes, textLineLimit);
       if (!indexedFile) {
         continue;
       }
 
       nextFiles.push(indexedFile);
+      remainingTextLines = Math.max(0, remainingTextLines - indexedFile.textLines.length);
       if (existing) {
         updatedFiles += 1;
       } else {
@@ -252,7 +270,7 @@ export class CodeMapIndexer {
     await this.saveIndex(current);
   }
 
-  private async indexFile(uri: vscode.Uri, maxFileSizeBytes: number): Promise<CodeMapFile | undefined> {
+  private async indexFile(uri: vscode.Uri, maxFileSizeBytes: number, textLineLimit: number): Promise<CodeMapFile | undefined> {
     if (uri.scheme !== 'file') {
       return undefined;
     }
@@ -269,7 +287,7 @@ export class CodeMapIndexer {
 
     const content = await fs.readFile(uri.fsPath, 'utf8');
     const language = getLanguageFromPath(uri.fsPath);
-    const textLines = extractTextLines(content);
+    const textLines = extractTextLines(content, textLineLimit);
     const symbols = extractSymbols(content, location.workspaceFolder, location.relativePath, language);
 
     return {
@@ -475,10 +493,14 @@ function getLanguageFromPath(filePath: string): string {
   }
 }
 
-function extractTextLines(content: string): CodeMapTextLine[] {
+function extractTextLines(content: string, limit: number): CodeMapTextLine[] {
+  if (limit <= 0) {
+    return [];
+  }
+
   return content
     .split(/\r?\n/)
-    .slice(0, DEFAULT_TEXT_LINE_LIMIT)
+    .slice(0, limit)
     .map((text, index) => ({ text: text.trim(), line: index }))
     .filter((line) => line.text.length > 0 && line.text.length <= 500);
 }

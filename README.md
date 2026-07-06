@@ -31,6 +31,7 @@ If you want a Search Everywhere experience closer to JetBrains IDEs, but inside 
 - Startup auto-sync for existing indexes.
 - Manual sync after `git pull`, SVN update, branch switching, or external file changes.
 - `.codemapignore` support for excluding resources, generated files, and large folders.
+- Text indexing caps for very large workspaces.
 - Index info view with file count, symbol count, language counts, and storage path.
 
 ## Editions
@@ -151,6 +152,22 @@ build/
 ```
 
 This is especially useful for game projects, editor projects, and monorepos.
+
+## Large Workspace Notes
+
+For very large workspaces, CodeMap keeps symbol indexing complete but limits stored text lines by default:
+
+- `codemap.maxTextLinesPerFile`: `200`
+- `codemap.maxTotalTextLines`: `200000`
+- `codemap.indexTextLines`: `true`
+
+If you only need class/function/file navigation, you can disable text indexing:
+
+```json
+"codemap.indexTextLines": false
+```
+
+This keeps the index much smaller while preserving symbol and file search.
 
 ## Tested On
 
