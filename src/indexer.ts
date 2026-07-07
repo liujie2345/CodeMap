@@ -1,5 +1,7 @@
 import * as fs from 'fs/promises';
+import * as nodeFs from 'fs';
 import * as path from 'path';
+import * as readline from 'readline';
 import * as vscode from 'vscode';
 import {
   CodeMapFile,
@@ -8,12 +10,14 @@ import {
   CodeMapIndexSummary,
   CodeMapSyncResult,
   CodeMapSymbol,
-  CodeMapTextLine
+  CodeMapTextLine,
+  SearchResult
 } from './types';
 
 const INDEX_VERSION = 1;
 const DEFAULT_TEXT_LINE_LIMIT = 200;
-const DEFAULT_TOTAL_TEXT_LINE_LIMIT = 0;
+const DEFAULT_TOTAL_TEXT_LINE_LIMIT = 1000000;
+const TEXT_SHARD_COUNT = 64;
 export const DEFAULT_INCLUDE_GLOB = '**/*.{ts,tsx,js,jsx,mjs,cjs,py,lua,java,kt,kts,go,rs,cs,cpp,cxx,cc,c,h,hpp,php,rb,swift,dart,vue,svelte,sh,bash,zsh,ps1}';
 
 export interface BuildIndexProgress {
@@ -98,13 +102,20 @@ export class CodeMapIndexer {
       total: uniqueUris.length
     });
 
-    const index: CodeMapIndex = {
+    const indexWithText: CodeMapIndex = {
       version: INDEX_VERSION,
       createdAt: new Date().toISOString(),
       workspaceFolders: workspaceFolders.map((folder) => folder.uri.fsPath),
       files: dedupeFiles(files)
     };
 
+    if (indexTextLines) {
+      await this.saveTextIndex(indexWithText.files);
+    } else {
+      await this.clearTextIndex();
+    }
+
+    const index = stripIndexTextLines(indexWithText);
     await this.saveIndex(index);
     this.index = index;
 
@@ -140,10 +151,15 @@ export class CodeMapIndexer {
       });
 
       if (indexedFile) {
-        current.files.push(indexedFile);
+        current.files.push(stripFileTextLines(indexedFile));
       }
 
       current.createdAt = new Date().toISOString();
+      if (indexTextLines) {
+        await this.replaceTextIndexEntries(location.workspaceFolder, location.relativePath, indexedFile);
+      } else {
+        await this.removeTextIndexEntries(location.workspaceFolder, location.relativePath);
+      }
       await this.saveIndex(current);
       this.log(`Updated index entry for ${location.relativePath}.`);
     } catch (error) {
@@ -184,6 +200,7 @@ export class CodeMapIndexer {
     const existingByKey = new Map(current.files.map((file) => [fileKey(file.workspaceFolder, file.relativePath), file]));
     const nextFiles: CodeMapFile[] = [];
     const seenKeys = new Set<string>();
+    const textReplacements = new Map<string, CodeMapFile | undefined>();
     let addedFiles = 0;
     let updatedFiles = 0;
 
@@ -221,10 +238,9 @@ export class CodeMapIndexer {
       if (existing && existing.size === stat.size && existing.mtimeMs === stat.mtimeMs) {
         const preserved = {
           ...existing,
-          textLines: existing.textLines.slice(0, Math.min(maxTextLinesPerFile, remainingTextLines))
+          textLines: []
         };
         nextFiles.push(preserved);
-        remainingTextLines = Math.max(0, remainingTextLines - preserved.textLines.length);
         continue;
       }
 
@@ -240,7 +256,10 @@ export class CodeMapIndexer {
         continue;
       }
 
-      nextFiles.push(indexedFile);
+      nextFiles.push(stripFileTextLines(indexedFile));
+      if (indexTextLines) {
+        textReplacements.set(key, indexedFile);
+      }
       remainingTextLines = Math.max(0, remainingTextLines - indexedFile.textLines.length);
       if (existing) {
         updatedFiles += 1;
@@ -249,9 +268,18 @@ export class CodeMapIndexer {
       }
     }
 
-    const removedFiles = current.files.filter((file) => !seenKeys.has(fileKey(file.workspaceFolder, file.relativePath))).length;
+    const removedFileEntries = current.files.filter((file) => !seenKeys.has(fileKey(file.workspaceFolder, file.relativePath)));
+    for (const removed of removedFileEntries) {
+      textReplacements.set(fileKey(removed.workspaceFolder, removed.relativePath), undefined);
+    }
+    const removedFiles = removedFileEntries.length;
     current.files = dedupeFiles(nextFiles);
     current.createdAt = new Date().toISOString();
+    if (indexTextLines) {
+      await this.applyTextIndexReplacements(textReplacements);
+    } else {
+      await this.clearTextIndex();
+    }
     await this.saveIndex(current);
     this.index = current;
 
@@ -288,6 +316,79 @@ export class CodeMapIndexer {
     };
   }
 
+  async searchTextIndex(rawQuery: string, limit: number): Promise<CodeMapTextSearchResult[]> {
+    const query = rawQuery.trim();
+    if (!query || limit <= 0) {
+      return [];
+    }
+
+    const paths = getIndexPaths();
+    if (!paths) {
+      return [];
+    }
+
+    const queryLower = query.toLowerCase();
+    const results: CodeMapTextSearchResult[] = [];
+    const startedAt = Date.now();
+
+    for (let shard = 0; shard < TEXT_SHARD_COUNT && results.length < limit; shard += 1) {
+      const shardPath = getTextShardPath(paths, shard);
+      try {
+        await fs.access(shardPath);
+      } catch {
+        continue;
+      }
+
+      const reader = readline.createInterface({
+        input: nodeFs.createReadStream(shardPath, { encoding: 'utf8' }),
+        crlfDelay: Infinity
+      });
+
+      for await (const line of reader) {
+        if (!line.trim()) {
+          continue;
+        }
+
+        let entry: TextShardEntry;
+        try {
+          entry = JSON.parse(line) as TextShardEntry;
+        } catch (error) {
+          this.logError(`Failed to parse text shard line in ${shardPath}`, error);
+          continue;
+        }
+
+        const textLower = entry.text.toLowerCase();
+        const character = textLower.indexOf(queryLower);
+        if (character < 0) {
+          continue;
+        }
+
+        results.push({
+          kind: 'text',
+          label: trimPreview(entry.text),
+          description: `${entry.relativePath}:${entry.line + 1}`,
+          detail: entry.relativePath,
+          score: 120 + Math.max(0, 120 - character),
+          location: {
+            workspaceFolder: entry.workspaceFolder,
+            relativePath: entry.relativePath,
+            line: entry.line,
+            character
+          },
+          preview: entry.text
+        });
+
+        if (results.length >= limit) {
+          reader.close();
+          break;
+        }
+      }
+    }
+
+    this.log(`Text shard search query="${query}" results=${results.length} durationMs=${Date.now() - startedAt}`);
+    return results.sort((left, right) => right.score - left.score || left.description.localeCompare(right.description));
+  }
+
   async clearIndex(): Promise<void> {
     const paths = getIndexPaths();
     this.index = undefined;
@@ -310,6 +411,7 @@ export class CodeMapIndexer {
       return file.workspaceFolder !== location.workspaceFolder || file.relativePath !== location.relativePath;
     });
     current.createdAt = new Date().toISOString();
+    await this.removeTextIndexEntries(location.workspaceFolder, location.relativePath);
     await this.saveIndex(current);
     this.log(`Removed index entry for ${location.relativePath}.`);
   }
@@ -429,6 +531,76 @@ export class CodeMapIndexer {
     this.log('Index save completed.');
   }
 
+  private async saveTextIndex(files: CodeMapFile[]): Promise<void> {
+    const paths = getIndexPaths();
+    if (!paths) {
+      return;
+    }
+
+    await fs.rm(paths.textShardsDir, { recursive: true, force: true });
+    await fs.mkdir(paths.textShardsDir, { recursive: true });
+
+    const writer = new TextShardWriter(paths);
+    let textLineCount = 0;
+    try {
+      for (const file of files) {
+        textLineCount += file.textLines.length;
+        await writer.writeFile(file);
+      }
+    } finally {
+      await writer.close();
+    }
+
+    this.log(`Text shard index saved. files=${files.length}, textLines=${textLineCount}, dir=${paths.textShardsDir}`);
+  }
+
+  private async clearTextIndex(): Promise<void> {
+    const paths = getIndexPaths();
+    if (!paths) {
+      return;
+    }
+
+    await fs.rm(paths.textShardsDir, { recursive: true, force: true });
+    this.log(`Text shard index cleared at ${paths.textShardsDir}.`);
+  }
+
+  private async replaceTextIndexEntries(
+    workspaceFolder: string,
+    relativePath: string,
+    file: CodeMapFile | undefined
+  ): Promise<void> {
+    const replacements = new Map<string, CodeMapFile | undefined>();
+    replacements.set(fileKey(workspaceFolder, relativePath), file);
+    await this.applyTextIndexReplacements(replacements);
+  }
+
+  private async removeTextIndexEntries(workspaceFolder: string, relativePath: string): Promise<void> {
+    await this.replaceTextIndexEntries(workspaceFolder, relativePath, undefined);
+  }
+
+  private async applyTextIndexReplacements(replacements: Map<string, CodeMapFile | undefined>): Promise<void> {
+    const paths = getIndexPaths();
+    if (!paths || replacements.size === 0) {
+      return;
+    }
+
+    await fs.mkdir(paths.textShardsDir, { recursive: true });
+    const byShard = new Map<number, Map<string, CodeMapFile | undefined>>();
+    for (const [key, file] of replacements) {
+      const relativePath = file?.relativePath ?? fileKeyParts(key).relativePath;
+      const shard = textShardForRelativePath(relativePath);
+      const shardReplacements = byShard.get(shard) ?? new Map<string, CodeMapFile | undefined>();
+      shardReplacements.set(key, file);
+      byShard.set(shard, shardReplacements);
+    }
+
+    for (const [shard, shardReplacements] of byShard) {
+      await rewriteTextShard(paths, shard, shardReplacements);
+    }
+
+    this.log(`Text shard replacements applied. files=${replacements.size}, shards=${byShard.size}`);
+  }
+
   private log(message: string): void {
     this.output.appendLine(`[CodeMap ${new Date().toISOString()}] ${message}`);
   }
@@ -443,6 +615,7 @@ interface CodeMapIndexPaths {
   indexDir: string;
   metaPath: string;
   filesPath: string;
+  textShardsDir: string;
   legacyIndexPath: string;
 }
 
@@ -457,6 +630,7 @@ function getIndexPaths(): CodeMapIndexPaths | undefined {
     indexDir,
     metaPath: path.join(indexDir, 'meta.json'),
     filesPath: path.join(indexDir, 'files.jsonl'),
+    textShardsDir: path.join(indexDir, 'text-shards'),
     legacyIndexPath: path.join(indexDir, 'index.json')
   };
 }
@@ -511,6 +685,147 @@ async function writeFilesJsonl(filePath: string, files: CodeMapFile[]): Promise<
   } finally {
     await handle.close();
   }
+}
+
+type CodeMapTextSearchResult = SearchResult;
+
+interface TextShardEntry {
+  workspaceFolder: string;
+  relativePath: string;
+  line: number;
+  text: string;
+}
+
+class TextShardWriter {
+  private readonly handles = new Map<number, fs.FileHandle>();
+
+  public constructor(private readonly paths: CodeMapIndexPaths) {}
+
+  public async writeFile(file: CodeMapFile): Promise<void> {
+    if (file.textLines.length === 0) {
+      return;
+    }
+
+    const shard = textShardForRelativePath(file.relativePath);
+    const handle = await this.getHandle(shard);
+    const lines = file.textLines
+      .map((line) => JSON.stringify({
+        workspaceFolder: file.workspaceFolder,
+        relativePath: file.relativePath,
+        line: line.line,
+        text: line.text
+      } satisfies TextShardEntry))
+      .join('\n');
+    await handle.writeFile(`${lines}\n`, 'utf8');
+  }
+
+  public async close(): Promise<void> {
+    const handles = Array.from(this.handles.values());
+    this.handles.clear();
+    await Promise.all(handles.map((handle) => handle.close()));
+  }
+
+  private async getHandle(shard: number): Promise<fs.FileHandle> {
+    const existing = this.handles.get(shard);
+    if (existing) {
+      return existing;
+    }
+
+    const handle = await fs.open(getTextShardPath(this.paths, shard), 'a');
+    this.handles.set(shard, handle);
+    return handle;
+  }
+}
+
+async function rewriteTextShard(
+  paths: CodeMapIndexPaths,
+  shard: number,
+  replacements: Map<string, CodeMapFile | undefined>
+): Promise<void> {
+  const shardPath = getTextShardPath(paths, shard);
+  const tmpPath = `${shardPath}.tmp`;
+  const writer = await fs.open(tmpPath, 'w');
+
+  try {
+    try {
+      await fs.access(shardPath);
+      const reader = readline.createInterface({
+        input: nodeFs.createReadStream(shardPath, { encoding: 'utf8' }),
+        crlfDelay: Infinity
+      });
+
+      for await (const line of reader) {
+        if (!line.trim()) {
+          continue;
+        }
+
+        let entry: TextShardEntry;
+        try {
+          entry = JSON.parse(line) as TextShardEntry;
+        } catch {
+          continue;
+        }
+
+        if (replacements.has(fileKey(entry.workspaceFolder, entry.relativePath))) {
+          continue;
+        }
+
+        await writer.writeFile(`${line}\n`, 'utf8');
+      }
+    } catch {
+      // Missing shards are normal for new indexes.
+    }
+
+    for (const file of replacements.values()) {
+      if (!file || file.textLines.length === 0) {
+        continue;
+      }
+
+      for (const line of file.textLines) {
+        const entry: TextShardEntry = {
+          workspaceFolder: file.workspaceFolder,
+          relativePath: file.relativePath,
+          line: line.line,
+          text: line.text
+        };
+        await writer.writeFile(`${JSON.stringify(entry)}\n`, 'utf8');
+      }
+    }
+  } finally {
+    await writer.close();
+  }
+
+  await fs.rename(tmpPath, shardPath);
+}
+
+function getTextShardPath(paths: CodeMapIndexPaths, shard: number): string {
+  return path.join(paths.textShardsDir, `${String(shard).padStart(2, '0')}.jsonl`);
+}
+
+function textShardForRelativePath(relativePath: string): number {
+  return Math.abs(hashString(relativePath)) % TEXT_SHARD_COUNT;
+}
+
+function hashString(value: string): number {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = ((hash << 5) - hash + value.charCodeAt(index)) | 0;
+  }
+  return hash;
+}
+
+function stripIndexTextLines(index: CodeMapIndex): CodeMapIndex {
+  return {
+    ...index,
+    files: index.files.map(stripFileTextLines)
+  };
+}
+
+function stripFileTextLines(file: CodeMapFile): CodeMapFile {
+  return {
+    ...file,
+    textLines: []
+  };
 }
 
 function getLanguageFromPath(filePath: string): string {
@@ -819,7 +1134,19 @@ function dedupeFiles(files: CodeMapFile[]): CodeMapFile[] {
 }
 
 function fileKey(workspaceFolder: string, relativePath: string): string {
-  return `${workspaceFolder}:${relativePath}`;
+  return `${workspaceFolder}\u0000${relativePath}`;
+}
+
+function fileKeyParts(key: string): { workspaceFolder: string; relativePath: string } {
+  const separatorIndex = key.indexOf('\u0000');
+  if (separatorIndex < 0) {
+    return { workspaceFolder: '', relativePath: key };
+  }
+
+  return {
+    workspaceFolder: key.slice(0, separatorIndex),
+    relativePath: key.slice(separatorIndex + 1)
+  };
 }
 
 function dedupeUris(uris: vscode.Uri[]): vscode.Uri[] {
@@ -938,6 +1265,15 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.+^${}()|[\]\\]/g, '\\$&');
 }
 
+function trimPreview(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.length <= 96) {
+    return trimmed;
+  }
+
+  return `${trimmed.slice(0, 93)}...`;
+}
+
 function formatError(error: unknown): string {
   if (error instanceof Error) {
     return [
@@ -962,17 +1298,5 @@ function countLanguages(files: CodeMapFile[]): Record<string, number> {
 }
 
 function trimLoadedTextLines(files: CodeMapFile[]): CodeMapFile[] {
-  const config = vscode.workspace.getConfiguration('codemap');
-  const indexTextLines = config.get<boolean>('indexTextLines', false);
-  if (!indexTextLines) {
-    return files.map((file) => ({ ...file, textLines: [] }));
-  }
-
-  const perFileLimit = config.get<number>('maxTextLinesPerFile', DEFAULT_TEXT_LINE_LIMIT);
-  let remaining = config.get<number>('maxTotalTextLines', DEFAULT_TOTAL_TEXT_LINE_LIMIT);
-  return files.map((file) => {
-    const textLines = file.textLines.slice(0, Math.min(perFileLimit, remaining));
-    remaining = Math.max(0, remaining - textLines.length);
-    return { ...file, textLines };
-  });
+  return files.map(stripFileTextLines);
 }

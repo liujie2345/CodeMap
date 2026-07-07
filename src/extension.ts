@@ -2,7 +2,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { BuildIndexProgress, CodeMapIndexer, DEFAULT_INCLUDE_GLOB } from './indexer';
 import { SearchScope, searchIndex } from './search';
-import { CodeMapResultKind, SearchResult } from './types';
+import { CodeMapIndex, CodeMapResultKind, SearchResult } from './types';
 
 interface SearchEverywhereItem extends vscode.QuickPickItem {
   result?: SearchResult;
@@ -180,9 +180,12 @@ async function searchEverywhere(
       const config = vscode.workspace.getConfiguration('codemap');
       const maxTextMatches = config.get<number>('maxTextMatches', 80);
       const startedAt = Date.now();
-      const results = searchIndex(activeIndex, query, { scope: 'all', maxTextMatches });
-      log(output, `QuickPick search query="${query}" results=${results.length} durationMs=${Date.now() - startedAt}`);
-      quickPick.items = toQuickPickItems(results);
+      void searchWithText(indexer, activeIndex, query, 'all', maxTextMatches, 150).then((results) => {
+        log(output, `QuickPick search query="${query}" results=${results.length} durationMs=${Date.now() - startedAt}`);
+        quickPick.items = toQuickPickItems(results);
+      }).catch((error) => {
+        showLoggedError(output, `QuickPick search failed for query="${query}"`, error);
+      });
     } catch (error) {
       showLoggedError(output, `QuickPick search failed for query="${query}"`, error);
     }
@@ -361,11 +364,7 @@ async function openSearchPanel(
         const maxTextMatches = config.get<number>('maxTextMatches', 80);
         const scope = panelModeToSearchScope(message.mode);
         const startedAt = Date.now();
-        const results = searchIndex(activeIndex, message.query, {
-          scope,
-          maxTextMatches,
-          limit: 150
-        });
+        const results = await searchWithText(indexer, activeIndex, message.query, scope, maxTextMatches, 150);
         const groupedResults = groupPanelResults(results);
         log(output, `Panel search query="${message.query}" mode=${message.mode} scope=${scope} rawResults=${results.length} groups=${groupedResults.length} durationMs=${Date.now() - startedAt}`);
         await panel.webview.postMessage({
@@ -469,6 +468,42 @@ function panelModeToSearchScope(mode: PanelMode): SearchScope {
     case 'all':
       return 'all';
   }
+}
+
+async function searchWithText(
+  indexer: CodeMapIndexer,
+  index: CodeMapIndex,
+  query: string,
+  scope: SearchScope,
+  maxTextMatches: number,
+  limit: number
+): Promise<SearchResult[]> {
+  if (!query.trim()) {
+    return [];
+  }
+
+  if (scope === 'text') {
+    return indexer.searchTextIndex(query, Math.min(maxTextMatches, limit));
+  }
+
+  const symbolResults = searchIndex(index, query, {
+    scope,
+    maxTextMatches: 0,
+    limit
+  });
+
+  if (scope !== 'all' || maxTextMatches <= 0) {
+    return symbolResults;
+  }
+
+  const textResults = await indexer.searchTextIndex(query, maxTextMatches);
+  return [...symbolResults, ...textResults]
+    .sort(compareSearchResults)
+    .slice(0, limit);
+}
+
+function compareSearchResults(left: SearchResult, right: SearchResult): number {
+  return right.score - left.score || left.label.localeCompare(right.label);
 }
 
 function groupPanelResults(results: SearchResult[]): Array<{ title: string; kind: CodeMapResultKind; items: SearchResult[] }> {
