@@ -172,6 +172,16 @@ If you want text search, enable it explicitly:
 
 The default keeps the index much smaller while preserving symbol and file search.
 
+## Troubleshooting Logs
+
+When indexing or searching fails, run:
+
+```text
+CodeMap: Show Logs
+```
+
+The log includes command names, glob scan counts, index load/save stages, search query timing, and full error stack traces. For large-workspace issues, include the lines around the first `ERROR:` entry when reporting a problem.
+
 ## Tested On
 
 Early testing has used:

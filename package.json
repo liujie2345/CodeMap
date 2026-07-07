@@ -2,7 +2,7 @@
   "name": "codemap-everywhere",
   "displayName": "CodeMap Everywhere",
   "description": "Fast structured Search Everywhere for large VS Code workspaces and monorepos.",
-  "version": "0.4.1",
+  "version": "0.4.5",
   "publisher": "codemap",
   "license": "UNLICENSED",
   "repository": {
@@ -33,6 +33,7 @@
     "onCommand:codemap.buildIndex",
     "onCommand:codemap.syncIndex",
     "onCommand:codemap.showIndexInfo",
+    "onCommand:codemap.showLogs",
     "onCommand:codemap.clearIndex",
     "onStartupFinished"
   ],
@@ -61,6 +62,10 @@
       {
         "command": "codemap.showIndexInfo",
         "title": "CodeMap: Show Index Info"
+      },
+      {
+        "command": "codemap.showLogs",
+        "title": "CodeMap: Show Logs"
       },
       {
         "command": "codemap.clearIndex",

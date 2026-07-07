@@ -32,10 +32,13 @@ export class CodeMapIndexer {
 
   async getIndex(): Promise<CodeMapIndex | undefined> {
     if (this.index) {
+      this.log(`Using cached index with ${this.index.files.length} files.`);
       return this.index;
     }
 
+    this.log('Loading workspace index from disk.');
     this.index = await this.loadIndex();
+    this.log(this.index ? `Loaded index with ${this.index.files.length} files.` : 'No index found on disk.');
     return this.index;
   }
 
@@ -54,20 +57,36 @@ export class CodeMapIndexer {
     let remainingTextLines = indexTextLines ? config.get<number>('maxTotalTextLines', DEFAULT_TOTAL_TEXT_LINE_LIMIT) : 0;
 
     const startedAt = Date.now();
-    this.output.appendLine(`[CodeMap] Building index for ${workspaceFolders.length} workspace folder(s).`);
+    this.log(`Building index for ${workspaceFolders.length} workspace folder(s).`);
+    this.log(`Workspace folders: ${workspaceFolders.map((folder) => folder.uri.fsPath).join(' | ')}`);
+    this.log(`Include globs: ${includeGlobs.join(' | ')}`);
+    this.log(`Exclude globs: ${excludeGlobs.join(' | ') || '(none)'}`);
+    this.log(`Limits: maxFileSizeBytes=${maxFileSizeBytes}, indexTextLines=${indexTextLines}, maxTextLinesPerFile=${maxTextLinesPerFile}, maxTotalTextLines=${remainingTextLines}`);
 
-    const uniqueUris = await collectIndexableUris(includeGlobs, excludeGlobs);
+    const uniqueUris = await collectIndexableUris(includeGlobs, excludeGlobs, this.output);
+    this.log(`Collected ${uniqueUris.length} unique indexable files.`);
     const files: CodeMapFile[] = [];
     for (let index = 0; index < uniqueUris.length; index += 1) {
       const uri = uniqueUris[index];
+      const location = getWorkspaceLocation(uri);
       onProgress?.({
         processed: index,
         total: uniqueUris.length,
-        currentFile: getWorkspaceLocation(uri)?.relativePath
+        currentFile: location?.relativePath
       });
 
+      if (index > 0 && index % 1000 === 0) {
+        this.log(`Build progress: indexed ${index}/${uniqueUris.length} candidates, accepted ${files.length} files.`);
+      }
+
       const textLineLimit = Math.min(maxTextLinesPerFile, remainingTextLines);
-      const indexedFile = await this.indexFile(uri, maxFileSizeBytes, textLineLimit);
+      let indexedFile: CodeMapFile | undefined;
+      try {
+        indexedFile = await this.indexFile(uri, maxFileSizeBytes, textLineLimit);
+      } catch (error) {
+        this.logError(`Failed to index file ${location?.relativePath ?? uri.fsPath}`, error);
+        continue;
+      }
       if (indexedFile) {
         files.push(indexedFile);
         remainingTextLines = Math.max(0, remainingTextLines - indexedFile.textLines.length);
@@ -91,40 +110,45 @@ export class CodeMapIndexer {
 
     const durationMs = Date.now() - startedAt;
     const symbolCount = index.files.reduce((count, file) => count + file.symbols.length, 0);
-    this.output.appendLine(`[CodeMap] Indexed ${index.files.length} files and ${symbolCount} symbols in ${durationMs}ms.`);
+    this.log(`Indexed ${index.files.length} files and ${symbolCount} symbols in ${durationMs}ms.`);
     return index;
   }
 
   async updateFile(uri: vscode.Uri): Promise<void> {
-    const current = await this.getIndex();
-    if (!current || uri.scheme !== 'file') {
-      return;
+    try {
+      const current = await this.getIndex();
+      if (!current || uri.scheme !== 'file') {
+        return;
+      }
+
+      const config = vscode.workspace.getConfiguration('codemap');
+      const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+      const excludeGlobs = await getEffectiveExcludeGlobs(workspaceFolders);
+      const maxFileSizeBytes = config.get<number>('maxFileSizeBytes', 1024 * 1024);
+      const indexTextLines = config.get<boolean>('indexTextLines', false);
+      const textLineLimit = indexTextLines ? config.get<number>('maxTextLinesPerFile', DEFAULT_TEXT_LINE_LIMIT) : 0;
+      const location = getWorkspaceLocation(uri);
+      if (!location) {
+        return;
+      }
+      const indexedFile = isRelativePathIgnored(location.relativePath, excludeGlobs)
+        ? undefined
+        : await this.indexFile(uri, maxFileSizeBytes, textLineLimit);
+
+      current.files = current.files.filter((file) => {
+        return file.workspaceFolder !== location.workspaceFolder || file.relativePath !== location.relativePath;
+      });
+
+      if (indexedFile) {
+        current.files.push(indexedFile);
+      }
+
+      current.createdAt = new Date().toISOString();
+      await this.saveIndex(current);
+      this.log(`Updated index entry for ${location.relativePath}.`);
+    } catch (error) {
+      this.logError(`Failed to update file ${uri.fsPath}`, error);
     }
-
-    const config = vscode.workspace.getConfiguration('codemap');
-    const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
-    const excludeGlobs = await getEffectiveExcludeGlobs(workspaceFolders);
-    const maxFileSizeBytes = config.get<number>('maxFileSizeBytes', 1024 * 1024);
-    const indexTextLines = config.get<boolean>('indexTextLines', false);
-    const textLineLimit = indexTextLines ? config.get<number>('maxTextLinesPerFile', DEFAULT_TEXT_LINE_LIMIT) : 0;
-    const location = getWorkspaceLocation(uri);
-    if (!location) {
-      return;
-    }
-    const indexedFile = isRelativePathIgnored(location.relativePath, excludeGlobs)
-      ? undefined
-      : await this.indexFile(uri, maxFileSizeBytes, textLineLimit);
-
-    current.files = current.files.filter((file) => {
-      return file.workspaceFolder !== location.workspaceFolder || file.relativePath !== location.relativePath;
-    });
-
-    if (indexedFile) {
-      current.files.push(indexedFile);
-    }
-
-    current.createdAt = new Date().toISOString();
-    await this.saveIndex(current);
   }
 
   async syncIndex(onProgress?: (progress: BuildIndexProgress) => void): Promise<CodeMapSyncResult> {
@@ -152,7 +176,11 @@ export class CodeMapIndexer {
     const indexTextLines = config.get<boolean>('indexTextLines', false);
     const maxTextLinesPerFile = indexTextLines ? config.get<number>('maxTextLinesPerFile', DEFAULT_TEXT_LINE_LIMIT) : 0;
     let remainingTextLines = indexTextLines ? config.get<number>('maxTotalTextLines', DEFAULT_TOTAL_TEXT_LINE_LIMIT) : 0;
-    const uniqueUris = await collectIndexableUris(includeGlobs, excludeGlobs);
+    this.log(`Syncing index. Existing files=${current.files.length}.`);
+    this.log(`Include globs: ${includeGlobs.join(' | ')}`);
+    this.log(`Exclude globs: ${excludeGlobs.join(' | ') || '(none)'}`);
+    const uniqueUris = await collectIndexableUris(includeGlobs, excludeGlobs, this.output);
+    this.log(`Collected ${uniqueUris.length} unique sync candidates.`);
     const existingByKey = new Map(current.files.map((file) => [fileKey(file.workspaceFolder, file.relativePath), file]));
     const nextFiles: CodeMapFile[] = [];
     const seenKeys = new Set<string>();
@@ -166,6 +194,10 @@ export class CodeMapIndexer {
         continue;
       }
 
+      if (index > 0 && index % 1000 === 0) {
+        this.log(`Sync progress: scanned ${index}/${uniqueUris.length}, nextFiles=${nextFiles.length}.`);
+      }
+
       onProgress?.({
         processed: index,
         total: uniqueUris.length,
@@ -175,7 +207,13 @@ export class CodeMapIndexer {
       const key = fileKey(location.workspaceFolder, location.relativePath);
       seenKeys.add(key);
       const existing = existingByKey.get(key);
-      const stat = await fs.stat(uri.fsPath);
+      let stat;
+      try {
+        stat = await fs.stat(uri.fsPath);
+      } catch (error) {
+        this.logError(`Failed to stat file during sync ${location.relativePath}`, error);
+        continue;
+      }
       if (stat.size > maxFileSizeBytes) {
         continue;
       }
@@ -191,7 +229,13 @@ export class CodeMapIndexer {
       }
 
       const textLineLimit = Math.min(maxTextLinesPerFile, remainingTextLines);
-      const indexedFile = await this.indexFile(uri, maxFileSizeBytes, textLineLimit);
+      let indexedFile: CodeMapFile | undefined;
+      try {
+        indexedFile = await this.indexFile(uri, maxFileSizeBytes, textLineLimit);
+      } catch (error) {
+        this.logError(`Failed to index file during sync ${location.relativePath}`, error);
+        continue;
+      }
       if (!indexedFile) {
         continue;
       }
@@ -216,9 +260,7 @@ export class CodeMapIndexer {
       total: uniqueUris.length
     });
 
-    this.output.appendLine(
-      `[CodeMap] Synced ${uniqueUris.length} files: +${addedFiles}, ~${updatedFiles}, -${removedFiles}.`
-    );
+    this.log(`Synced ${uniqueUris.length} files: +${addedFiles}, ~${updatedFiles}, -${removedFiles}.`);
 
     return {
       index: current,
@@ -253,6 +295,7 @@ export class CodeMapIndexer {
       return;
     }
 
+    this.log(`Clearing index at ${paths.indexDir}.`);
     await fs.rm(paths.indexDir, { recursive: true, force: true });
   }
 
@@ -268,6 +311,7 @@ export class CodeMapIndexer {
     });
     current.createdAt = new Date().toISOString();
     await this.saveIndex(current);
+    this.log(`Removed index entry for ${location.relativePath}.`);
   }
 
   private async indexFile(uri: vscode.Uri, maxFileSizeBytes: number, textLineLimit: number): Promise<CodeMapFile | undefined> {
@@ -305,11 +349,14 @@ export class CodeMapIndexer {
   private async loadIndex(): Promise<CodeMapIndex | undefined> {
     const paths = getIndexPaths();
     if (!paths) {
+      this.log('No workspace folder available for index paths.');
       return undefined;
     }
 
+    this.log(`Index paths: meta=${paths.metaPath}, files=${paths.filesPath}, legacy=${paths.legacyIndexPath}`);
     const splitIndex = await this.loadSplitIndex(paths);
     if (splitIndex) {
+      this.log('Loaded split JSONL index.');
       return splitIndex;
     }
 
@@ -339,7 +386,8 @@ export class CodeMapIndexer {
         workspaceFolders: meta.workspaceFolders,
         files
       };
-    } catch {
+    } catch (error) {
+      this.logError('Failed to load split JSONL index', error);
       return undefined;
     }
   }
@@ -353,7 +401,8 @@ export class CodeMapIndexer {
       }
       parsed.files = trimLoadedTextLines(parsed.files);
       return parsed;
-    } catch {
+    } catch (error) {
+      this.logError('Failed to load legacy JSON index', error);
       return undefined;
     }
   }
@@ -373,13 +422,20 @@ export class CodeMapIndexer {
       fileCount: index.files.length,
       symbolCount
     };
-    const filesJsonl = index.files.map((file) => JSON.stringify(file)).join('\n');
-
     await fs.mkdir(paths.indexDir, { recursive: true });
-    await Promise.all([
-      fs.writeFile(paths.metaPath, JSON.stringify(meta, null, 2), 'utf8'),
-      fs.writeFile(paths.filesPath, filesJsonl.length > 0 ? `${filesJsonl}\n` : '', 'utf8')
-    ]);
+    this.log(`Saving index: files=${index.files.length}, symbols=${symbolCount}, path=${paths.indexDir}`);
+    await fs.writeFile(paths.metaPath, JSON.stringify(meta, null, 2), 'utf8');
+    await writeFilesJsonl(paths.filesPath, index.files);
+    this.log('Index save completed.');
+  }
+
+  private log(message: string): void {
+    this.output.appendLine(`[CodeMap ${new Date().toISOString()}] ${message}`);
+  }
+
+  private logError(context: string, error: unknown): void {
+    this.output.appendLine(`[CodeMap ${new Date().toISOString()}] ERROR: ${context}`);
+    this.output.appendLine(formatError(error));
   }
 }
 
@@ -425,15 +481,36 @@ async function getEffectiveExcludeGlobs(workspaceFolders: readonly vscode.Worksp
   ];
 }
 
-async function collectIndexableUris(includeGlobs: string[], excludeGlobs: string[]): Promise<vscode.Uri[]> {
+async function collectIndexableUris(
+  includeGlobs: string[],
+  excludeGlobs: string[],
+  output?: vscode.OutputChannel
+): Promise<vscode.Uri[]> {
   const uris: vscode.Uri[] = [];
   const excludePattern = excludeGlobs.length > 0 ? `{${excludeGlobs.join(',')}}` : undefined;
   for (const includeGlob of includeGlobs) {
+    output?.appendLine(`[CodeMap ${new Date().toISOString()}] Finding files for glob: ${includeGlob}`);
     const found = await vscode.workspace.findFiles(includeGlob, excludePattern);
-    uris.push(...found);
+    output?.appendLine(`[CodeMap ${new Date().toISOString()}] Glob matched ${found.length} files: ${includeGlob}`);
+    for (const uri of found) {
+      uris.push(uri);
+    }
   }
 
-  return dedupeUris(uris);
+  const deduped = dedupeUris(uris);
+  output?.appendLine(`[CodeMap ${new Date().toISOString()}] Deduped ${uris.length} matched files to ${deduped.length}.`);
+  return deduped;
+}
+
+async function writeFilesJsonl(filePath: string, files: CodeMapFile[]): Promise<void> {
+  const handle = await fs.open(filePath, 'w');
+  try {
+    for (const file of files) {
+      await handle.writeFile(`${JSON.stringify(file)}\n`, 'utf8');
+    }
+  } finally {
+    await handle.close();
+  }
 }
 
 function getLanguageFromPath(filePath: string): string {
@@ -859,6 +936,21 @@ function globToRegExpSource(glob: string): string {
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+}
+
+function formatError(error: unknown): string {
+  if (error instanceof Error) {
+    return [
+      `${error.name}: ${error.message}`,
+      error.stack ? `Stack:\n${error.stack}` : undefined
+    ].filter(Boolean).join('\n');
+  }
+
+  try {
+    return JSON.stringify(error, null, 2);
+  } catch {
+    return String(error);
+  }
 }
 
 function countLanguages(files: CodeMapFile[]): Record<string, number> {

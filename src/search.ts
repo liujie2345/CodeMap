@@ -10,6 +10,11 @@ const KIND_WEIGHT: Record<CodeMapResultKind, number> = {
   text: 120
 };
 
+const DEFAULT_RESULT_LIMIT = 150;
+const MIN_CANDIDATE_LIMIT = 800;
+const CANDIDATE_LIMIT_MULTIPLIER = 8;
+const searchCacheByIndex = new WeakMap<CodeMapIndex, SearchCache>();
+
 export type SearchScope = 'all' | 'symbols' | 'classes' | 'functions' | 'files' | 'text';
 
 export interface SearchIndexOptions {
@@ -29,76 +34,73 @@ export function searchIndex(index: CodeMapIndex, rawQuery: string, maxTextMatche
     : maxTextMatchesOrOptions;
   const scope = options.scope ?? 'all';
   const maxTextMatches = options.maxTextMatches ?? 80;
-  const limit = options.limit ?? 150;
+  const limit = options.limit ?? DEFAULT_RESULT_LIMIT;
+  const candidateLimit = Math.max(MIN_CANDIDATE_LIMIT, limit * CANDIDATE_LIMIT_MULTIPLIER);
   const includeFiles = scope === 'all' || scope === 'files';
   const includeSymbols = scope === 'all' || scope === 'symbols' || scope === 'classes' || scope === 'functions';
   const includeText = scope === 'all' || scope === 'text';
+  const cache = getSearchCache(index);
 
-  const results: SearchResult[] = [];
+  const results = new BoundedSearchResults(candidateLimit);
   let textMatches = 0;
 
-  for (const file of index.files) {
-    const fileResult = includeFiles ? matchFile(file, query) : undefined;
-    if (fileResult) {
-      results.push(fileResult);
-    }
-
-    if (includeSymbols) {
-      for (const symbol of file.symbols) {
-        if (!symbolInScope(symbol.kind, scope)) {
-          continue;
-        }
-
-        const symbolScore = scoreCandidate(symbol.name, query);
-        if (symbolScore <= 0) {
-          continue;
-        }
-
-        results.push({
-          kind: symbol.kind,
-          label: symbol.name,
-          description: symbol.location.relativePath,
-          detail: symbol.signature,
-          score: KIND_WEIGHT[symbol.kind] + symbolScore,
-          location: symbol.location,
-          preview: symbol.signature
-        });
-      }
-    }
-
-    if (includeText && textMatches < maxTextMatches) {
-      for (const line of file.textLines) {
-        const lineScore = scoreCandidate(line.text, query);
-        if (lineScore <= 0) {
-          continue;
-        }
-
-        results.push({
-          kind: 'text',
-          label: trimPreview(line.text),
-          description: `${file.relativePath}:${line.line + 1}`,
-          detail: file.relativePath,
-          score: KIND_WEIGHT.text + Math.min(lineScore, 120),
-          location: {
-            workspaceFolder: file.workspaceFolder,
-            relativePath: file.relativePath,
-            line: line.line,
-            character: Math.max(0, line.text.toLowerCase().indexOf(query.compact))
-          },
-          preview: line.text
-        });
-        textMatches += 1;
-
-        if (textMatches >= maxTextMatches) {
-          break;
-        }
+  if (includeFiles) {
+    for (const file of cache.files) {
+      const fileResult = matchPreparedFile(file, query);
+      if (fileResult) {
+        results.add(fileResult);
       }
     }
   }
 
-  return dedupeResults(results)
-    .sort((left, right) => right.score - left.score || left.label.localeCompare(right.label))
-    .slice(0, limit);
+  if (includeSymbols) {
+    const symbols = getSymbolsForScope(cache, scope);
+    for (const symbol of symbols) {
+      const symbolScore = scorePreparedCandidate(symbol.search, query);
+      if (symbolScore <= 0) {
+        continue;
+      }
+
+      results.add({
+        kind: symbol.kind,
+        label: symbol.label,
+        description: symbol.description,
+        detail: symbol.detail,
+        score: KIND_WEIGHT[symbol.kind] + symbolScore,
+        location: symbol.location,
+        preview: symbol.preview
+      });
+    }
+  }
+
+  if (includeText && textMatches < maxTextMatches) {
+    for (const line of cache.text) {
+      const lineScore = scorePreparedCandidate(line.search, query);
+      if (lineScore <= 0) {
+        continue;
+      }
+
+      results.add({
+        kind: 'text',
+        label: line.label,
+        description: line.description,
+        detail: line.detail,
+        score: KIND_WEIGHT.text + Math.min(lineScore, 120),
+        location: {
+          ...line.location,
+          character: Math.max(0, line.search.normalized.indexOf(query.compact))
+        },
+        preview: line.preview
+      });
+      textMatches += 1;
+
+      if (textMatches >= maxTextMatches) {
+        break;
+      }
+    }
+  }
+
+  return results.toSorted(limit);
 }
 
 function symbolInScope(kind: CodeMapResultKind, scope: SearchScope): boolean {
@@ -113,10 +115,9 @@ function symbolInScope(kind: CodeMapResultKind, scope: SearchScope): boolean {
   return kind === 'class' || kind === 'interface' || kind === 'type' || kind === 'function';
 }
 
-function matchFile(file: CodeMapFile, query: NormalizedQuery): SearchResult | undefined {
-  const baseName = path.basename(file.relativePath);
-  const baseScore = scoreCandidate(baseName, query);
-  const pathScore = scoreCandidate(file.relativePath, query);
+function matchPreparedFile(file: PreparedFileCandidate, query: NormalizedQuery): SearchResult | undefined {
+  const baseScore = scorePreparedCandidate(file.baseSearch, query);
+  const pathScore = scorePreparedCandidate(file.pathSearch, query);
   const score = Math.max(baseScore + 25, pathScore);
 
   if (score <= 0) {
@@ -125,15 +126,10 @@ function matchFile(file: CodeMapFile, query: NormalizedQuery): SearchResult | un
 
   return {
     kind: 'file',
-    label: baseName,
-    description: file.relativePath,
+    label: file.label,
+    description: file.description,
     score: KIND_WEIGHT.file + score,
-    location: {
-      workspaceFolder: file.workspaceFolder,
-      relativePath: file.relativePath,
-      line: 0,
-      character: 0
-    }
+    location: file.location
   };
 }
 
@@ -165,50 +161,54 @@ function normalizeQuery(rawQuery: string): NormalizedQuery | undefined {
 
 function scoreCandidate(candidate: string, query: NormalizedQuery): number {
   const normalized = candidate.toLowerCase();
-  const separated = normalizeSeparators(normalized);
-  const compact = normalized.replace(/[\s._/-]+/g, '');
-  const baseName = path.basename(normalized);
-  const baseNameWithoutExtension = stripExtension(baseName);
-  const separatedBaseName = normalizeSeparators(baseName);
-  const separatedBaseNameWithoutExtension = stripExtension(separatedBaseName);
+  return scorePreparedCandidate(prepareSearchText(candidate, normalized), query);
+}
 
-  if (normalized === query.rawLower || baseName === query.rawLower || baseNameWithoutExtension === query.rawLower) {
+function scorePreparedCandidate(candidate: PreparedSearchText, query: NormalizedQuery): number {
+  if (
+    candidate.normalized === query.rawLower
+    || candidate.baseName === query.rawLower
+    || candidate.baseNameWithoutExtension === query.rawLower
+  ) {
     return 720;
   }
 
   if (
-    separated === query.separated
-    || separatedBaseName === query.separated
-    || separatedBaseNameWithoutExtension === query.separated
+    candidate.separated === query.separated
+    || candidate.separatedBaseName === query.separated
+    || candidate.separatedBaseNameWithoutExtension === query.separated
   ) {
     return 680;
   }
 
-  if (compact === query.compact) {
-    return 560 - lengthPenalty(compact, query.compact, 120);
+  if (candidate.compact === query.compact) {
+    return 560 - lengthPenalty(candidate.compact, query.compact, 120);
   }
 
-  if (separated.startsWith(query.separated) || separatedBaseName.startsWith(query.separated)) {
-    return 470 - lengthPenalty(separated, query.separated, 120);
+  if (candidate.separated.startsWith(query.separated) || candidate.separatedBaseName.startsWith(query.separated)) {
+    return 470 - lengthPenalty(candidate.separated, query.separated, 120);
   }
 
-  if (compact.startsWith(query.compact)) {
-    return 390 - lengthPenalty(compact, query.compact, 120);
+  if (candidate.compact.startsWith(query.compact)) {
+    return 390 - lengthPenalty(candidate.compact, query.compact, 120);
   }
 
-  if (separated.includes(query.separated) || separatedBaseName.includes(query.separated)) {
-    return 330 - Math.min(firstPositiveIndex([separated.indexOf(query.separated), separatedBaseName.indexOf(query.separated)]), 80);
+  if (candidate.separated.includes(query.separated) || candidate.separatedBaseName.includes(query.separated)) {
+    return 330 - Math.min(firstPositiveIndex([
+      candidate.separated.indexOf(query.separated),
+      candidate.separatedBaseName.indexOf(query.separated)
+    ]), 80);
   }
 
-  if (compact.includes(query.compact)) {
-    return 240 - Math.min(compact.indexOf(query.compact), 80);
+  if (candidate.compact.includes(query.compact)) {
+    return 240 - Math.min(candidate.compact.indexOf(query.compact), 80);
   }
 
-  if (query.tokens.length > 1 && query.tokens.every((token) => normalized.includes(token))) {
+  if (query.tokens.length > 1 && query.tokens.every((token) => candidate.normalized.includes(token))) {
     return 210;
   }
 
-  const fuzzy = fuzzyScore(compact, query.compact);
+  const fuzzy = fuzzyScore(candidate.compact, query.compact);
   if (fuzzy > 0) {
     return fuzzy;
   }
@@ -268,23 +268,202 @@ function trimPreview(value: string): string {
   return `${trimmed.slice(0, 93)}...`;
 }
 
-function dedupeResults(results: SearchResult[]): SearchResult[] {
-  const best = new Map<string, SearchResult>();
+class BoundedSearchResults {
+  private readonly best = new Map<string, SearchResult>();
 
-  for (const result of results) {
-    const key = [
-      result.kind,
-      result.location.workspaceFolder,
-      result.location.relativePath,
-      result.location.line,
-      result.label
-    ].join(':');
+  public constructor(private readonly candidateLimit: number) {}
 
-    const existing = best.get(key);
+  public add(result: SearchResult): void {
+    const key = resultKey(result);
+
+    const existing = this.best.get(key);
     if (!existing || result.score > existing.score) {
-      best.set(key, result);
+      this.best.set(key, result);
+    }
+
+    if (this.best.size > this.candidateLimit * 2) {
+      this.prune();
     }
   }
 
-  return [...best.values()];
+  public toSorted(limit: number): SearchResult[] {
+    return Array.from(this.best.values())
+      .sort(compareResults)
+      .slice(0, limit);
+  }
+
+  private prune(): void {
+    const kept = this.toSorted(this.candidateLimit);
+    this.best.clear();
+    for (const result of kept) {
+      this.best.set(resultKey(result), result);
+    }
+  }
+}
+
+function compareResults(left: SearchResult, right: SearchResult): number {
+  return right.score - left.score || left.label.localeCompare(right.label);
+}
+
+function resultKey(result: SearchResult): string {
+  return [
+    result.kind,
+    result.location.workspaceFolder,
+    result.location.relativePath,
+    result.location.line,
+    result.label
+  ].join(':');
+}
+
+interface PreparedSearchText {
+  normalized: string;
+  separated: string;
+  compact: string;
+  baseName: string;
+  baseNameWithoutExtension: string;
+  separatedBaseName: string;
+  separatedBaseNameWithoutExtension: string;
+}
+
+interface PreparedFileCandidate {
+  label: string;
+  description: string;
+  location: SearchResult['location'];
+  baseSearch: PreparedSearchText;
+  pathSearch: PreparedSearchText;
+}
+
+interface PreparedSymbolCandidate {
+  kind: Exclude<CodeMapResultKind, 'file' | 'text'>;
+  label: string;
+  description: string;
+  detail?: string;
+  preview?: string;
+  location: SearchResult['location'];
+  search: PreparedSearchText;
+}
+
+interface PreparedTextCandidate {
+  label: string;
+  description: string;
+  detail: string;
+  preview: string;
+  location: SearchResult['location'];
+  search: PreparedSearchText;
+}
+
+interface SearchCache {
+  createdAt: string;
+  fileCount: number;
+  files: PreparedFileCandidate[];
+  symbols: PreparedSymbolCandidate[];
+  classSymbols: PreparedSymbolCandidate[];
+  functionSymbols: PreparedSymbolCandidate[];
+  text: PreparedTextCandidate[];
+}
+
+function getSearchCache(index: CodeMapIndex): SearchCache {
+  const cached = searchCacheByIndex.get(index);
+  if (cached && cached.createdAt === index.createdAt && cached.fileCount === index.files.length) {
+    return cached;
+  }
+
+  const built = buildSearchCache(index);
+  searchCacheByIndex.set(index, built);
+  return built;
+}
+
+function buildSearchCache(index: CodeMapIndex): SearchCache {
+  const files: PreparedFileCandidate[] = [];
+  const symbols: PreparedSymbolCandidate[] = [];
+  const classSymbols: PreparedSymbolCandidate[] = [];
+  const functionSymbols: PreparedSymbolCandidate[] = [];
+  const text: PreparedTextCandidate[] = [];
+
+  for (const file of index.files) {
+    const baseName = path.basename(file.relativePath);
+    files.push({
+      label: baseName,
+      description: file.relativePath,
+      location: {
+        workspaceFolder: file.workspaceFolder,
+        relativePath: file.relativePath,
+        line: 0,
+        character: 0
+      },
+      baseSearch: prepareSearchText(baseName),
+      pathSearch: prepareSearchText(file.relativePath)
+    });
+
+    for (const symbol of file.symbols) {
+      const candidate: PreparedSymbolCandidate = {
+        kind: symbol.kind,
+        label: symbol.name,
+        description: symbol.location.relativePath,
+        detail: symbol.signature,
+        preview: symbol.signature,
+        location: symbol.location,
+        search: prepareSearchText(symbol.name)
+      };
+      symbols.push(candidate);
+      if (symbol.kind === 'class' || symbol.kind === 'interface' || symbol.kind === 'type') {
+        classSymbols.push(candidate);
+      }
+      if (symbol.kind === 'function') {
+        functionSymbols.push(candidate);
+      }
+    }
+
+    for (const line of file.textLines) {
+      text.push({
+        label: trimPreview(line.text),
+        description: `${file.relativePath}:${line.line + 1}`,
+        detail: file.relativePath,
+        preview: line.text,
+        location: {
+          workspaceFolder: file.workspaceFolder,
+          relativePath: file.relativePath,
+          line: line.line,
+          character: 0
+        },
+        search: prepareSearchText(line.text)
+      });
+    }
+  }
+
+  return {
+    createdAt: index.createdAt,
+    fileCount: index.files.length,
+    files,
+    symbols,
+    classSymbols,
+    functionSymbols,
+    text
+  };
+}
+
+function getSymbolsForScope(cache: SearchCache, scope: SearchScope): PreparedSymbolCandidate[] {
+  if (scope === 'classes') {
+    return cache.classSymbols;
+  }
+
+  if (scope === 'functions') {
+    return cache.functionSymbols;
+  }
+
+  return cache.symbols;
+}
+
+function prepareSearchText(value: string, normalized = value.toLowerCase()): PreparedSearchText {
+  const baseName = path.basename(normalized);
+  const separatedBaseName = normalizeSeparators(baseName);
+  return {
+    normalized,
+    separated: normalizeSeparators(normalized),
+    compact: normalized.replace(/[\s._/-]+/g, ''),
+    baseName,
+    baseNameWithoutExtension: stripExtension(baseName),
+    separatedBaseName,
+    separatedBaseNameWithoutExtension: stripExtension(separatedBaseName)
+  };
 }

@@ -31,9 +31,11 @@ export function activate(context: vscode.ExtensionContext): void {
   status.show();
 
   context.subscriptions.push(output, status);
+  log(output, `Activated CodeMap Everywhere ${context.extension.packageJSON?.version ?? 'unknown'}.`);
 
   context.subscriptions.push(
     vscode.commands.registerCommand('codemap.buildIndex', async () => {
+      log(output, 'Command started: Build Index.');
       await withProgress('Building CodeMap index', async (progress) => {
         status.text = 'CodeMap: indexing';
         try {
@@ -43,27 +45,31 @@ export function activate(context: vscode.ExtensionContext): void {
             lastProcessed = state.processed;
           });
           setReadyStatus(status, index);
+          log(output, `Command completed: Build Index. files=${index.files.length}`);
           vscode.window.showInformationMessage(`CodeMap indexed ${index.files.length} files.`);
         } catch (error) {
           status.text = 'CodeMap: error';
-          vscode.window.showErrorMessage(getErrorMessage(error));
-          output.appendLine(getErrorMessage(error));
+          showLoggedError(output, 'Build Index failed', error);
         }
       });
     }),
     vscode.commands.registerCommand('codemap.searchEverywhere', async () => {
-      await searchEverywhere(indexer, status);
+      await runLoggedCommand(output, status, 'Search Everywhere', () => searchEverywhere(indexer, status, output));
     }),
     vscode.commands.registerCommand('codemap.syncIndex', async () => {
-      await syncIndexWithProgress(indexer, status, true);
+      await syncIndexWithProgress(indexer, status, output, true);
     }),
     vscode.commands.registerCommand('codemap.openSearchPanel', async () => {
-      await openSearchPanel(indexer, status, context);
+      await runLoggedCommand(output, status, 'Open Search Panel', () => openSearchPanel(indexer, status, context, output));
     }),
     vscode.commands.registerCommand('codemap.showIndexInfo', async () => {
-      await showIndexInfo(indexer);
+      await runLoggedCommand(output, status, 'Show Index Info', () => showIndexInfo(indexer));
+    }),
+    vscode.commands.registerCommand('codemap.showLogs', () => {
+      output.show(true);
     }),
     vscode.commands.registerCommand('codemap.clearIndex', async () => {
+      log(output, 'Command started: Clear Index.');
       const answer = await vscode.window.showWarningMessage(
         'Clear the CodeMap index for this workspace?',
         { modal: true },
@@ -75,6 +81,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
       await indexer.clearIndex();
       status.text = 'CodeMap: no index';
+      log(output, 'Command completed: Clear Index.');
       vscode.window.showInformationMessage('CodeMap index cleared.');
     })
   );
@@ -83,13 +90,22 @@ export function activate(context: vscode.ExtensionContext): void {
   const ignoreWatcher = vscode.workspace.createFileSystemWatcher('**/.codemapignore');
   context.subscriptions.push(
     watcher,
-    watcher.onDidCreate((uri) => indexer.updateFile(uri)),
-    watcher.onDidChange((uri) => indexer.updateFile(uri)),
-    watcher.onDidDelete((uri) => indexer.removeFile(uri)),
+    watcher.onDidCreate((uri) => {
+      log(output, `Watcher create: ${uri.fsPath}`);
+      void indexer.updateFile(uri);
+    }),
+    watcher.onDidChange((uri) => {
+      log(output, `Watcher change: ${uri.fsPath}`);
+      void indexer.updateFile(uri);
+    }),
+    watcher.onDidDelete((uri) => {
+      log(output, `Watcher delete: ${uri.fsPath}`);
+      void indexer.removeFile(uri);
+    }),
     ignoreWatcher,
-    ignoreWatcher.onDidCreate(() => scheduleBackgroundSync(indexer, status)),
-    ignoreWatcher.onDidChange(() => scheduleBackgroundSync(indexer, status)),
-    ignoreWatcher.onDidDelete(() => scheduleBackgroundSync(indexer, status))
+    ignoreWatcher.onDidCreate(() => scheduleBackgroundSync(indexer, status, output)),
+    ignoreWatcher.onDidChange(() => scheduleBackgroundSync(indexer, status, output)),
+    ignoreWatcher.onDidDelete(() => scheduleBackgroundSync(indexer, status, output))
   );
 
   void indexer.getIndex().then((index) => {
@@ -97,11 +113,14 @@ export function activate(context: vscode.ExtensionContext): void {
       setReadyStatus(status, index);
       const config = vscode.workspace.getConfiguration('codemap');
       if (config.get<boolean>('autoSyncOnStartup', true)) {
-        scheduleBackgroundSync(indexer, status);
+        scheduleBackgroundSync(indexer, status, output);
       }
     } else {
       status.text = 'CodeMap: no index';
     }
+  }).catch((error) => {
+    status.text = 'CodeMap: load error';
+    logError(output, 'Startup index load failed', error);
   });
 }
 
@@ -109,7 +128,11 @@ export function deactivate(): void {
   // Nothing to clean up.
 }
 
-async function searchEverywhere(indexer: CodeMapIndexer, status: vscode.StatusBarItem): Promise<void> {
+async function searchEverywhere(
+  indexer: CodeMapIndexer,
+  status: vscode.StatusBarItem,
+  output: vscode.OutputChannel
+): Promise<void> {
   let index = await indexer.getIndex();
   if (!index) {
     const answer = await vscode.window.showInformationMessage(
@@ -138,6 +161,7 @@ async function searchEverywhere(indexer: CodeMapIndexer, status: vscode.StatusBa
   if (!activeIndex) {
     return;
   }
+  log(output, `QuickPick opened. files=${activeIndex.files.length}`);
 
   const quickPick = vscode.window.createQuickPick<SearchEverywhereItem>();
   quickPick.title = 'CodeMap Search Everywhere';
@@ -152,10 +176,16 @@ async function searchEverywhere(indexer: CodeMapIndexer, status: vscode.StatusBa
   ];
 
   const updateItems = debounce((query: string) => {
-    const config = vscode.workspace.getConfiguration('codemap');
-    const maxTextMatches = config.get<number>('maxTextMatches', 80);
-    const results = searchIndex(activeIndex, query, { scope: 'all', maxTextMatches });
-    quickPick.items = toQuickPickItems(results);
+    try {
+      const config = vscode.workspace.getConfiguration('codemap');
+      const maxTextMatches = config.get<number>('maxTextMatches', 80);
+      const startedAt = Date.now();
+      const results = searchIndex(activeIndex, query, { scope: 'all', maxTextMatches });
+      log(output, `QuickPick search query="${query}" results=${results.length} durationMs=${Date.now() - startedAt}`);
+      quickPick.items = toQuickPickItems(results);
+    } catch (error) {
+      showLoggedError(output, `QuickPick search failed for query="${query}"`, error);
+    }
   }, 70);
 
   quickPick.onDidChangeValue((value) => {
@@ -169,7 +199,7 @@ async function searchEverywhere(indexer: CodeMapIndexer, status: vscode.StatusBa
     }
 
     quickPick.hide();
-    await openResult(selected.result);
+    await openResult(selected.result, output);
   });
 
   quickPick.onDidHide(() => quickPick.dispose());
@@ -214,8 +244,10 @@ async function showIndexInfo(indexer: CodeMapIndexer): Promise<void> {
 async function syncIndexWithProgress(
   indexer: CodeMapIndexer,
   status: vscode.StatusBarItem,
+  output: vscode.OutputChannel,
   showSummary: boolean
 ): Promise<void> {
+  log(output, 'Command started: Sync Index.');
   await withProgress('Syncing CodeMap index', async (progress) => {
     status.text = 'CodeMap: syncing';
     try {
@@ -225,6 +257,7 @@ async function syncIndexWithProgress(
         lastProcessed = state.processed;
       });
       setReadyStatus(status, result.index);
+      log(output, `Command completed: Sync Index. scanned=${result.scannedFiles}, added=${result.addedFiles}, updated=${result.updatedFiles}, removed=${result.removedFiles}`);
       if (showSummary) {
         vscode.window.showInformationMessage(
           `CodeMap synced ${result.scannedFiles} files (+${result.addedFiles}, ~${result.updatedFiles}, -${result.removedFiles}).`
@@ -232,16 +265,21 @@ async function syncIndexWithProgress(
       }
     } catch (error) {
       status.text = 'CodeMap: error';
-      vscode.window.showErrorMessage(getErrorMessage(error));
+      showLoggedError(output, 'Sync Index failed', error);
     }
   });
 }
 
-function scheduleBackgroundSync(indexer: CodeMapIndexer, status: vscode.StatusBarItem): void {
+function scheduleBackgroundSync(
+  indexer: CodeMapIndexer,
+  status: vscode.StatusBarItem,
+  output: vscode.OutputChannel
+): void {
   if (backgroundSyncTimer) {
     clearTimeout(backgroundSyncTimer);
   }
 
+  log(output, 'Background sync scheduled.');
   status.text = 'CodeMap: stale';
   backgroundSyncTimer = setTimeout(() => {
     if (backgroundSyncRunning) {
@@ -250,13 +288,15 @@ function scheduleBackgroundSync(indexer: CodeMapIndexer, status: vscode.StatusBa
 
     backgroundSyncRunning = true;
     status.text = 'CodeMap: syncing';
+    log(output, 'Background sync started.');
     void indexer.syncIndex()
       .then((result) => {
         setReadyStatus(status, result.index);
+        log(output, `Background sync completed. scanned=${result.scannedFiles}, files=${result.index.files.length}`);
       })
       .catch((error) => {
         status.text = 'CodeMap: sync error';
-        console.error(error);
+        logError(output, 'Background sync failed', error);
       })
       .finally(() => {
         backgroundSyncRunning = false;
@@ -267,7 +307,8 @@ function scheduleBackgroundSync(indexer: CodeMapIndexer, status: vscode.StatusBa
 async function openSearchPanel(
   indexer: CodeMapIndexer,
   status: vscode.StatusBarItem,
-  context: vscode.ExtensionContext
+  context: vscode.ExtensionContext,
+  output: vscode.OutputChannel
 ): Promise<void> {
   let index = await indexer.getIndex();
   if (!index) {
@@ -297,6 +338,7 @@ async function openSearchPanel(
   if (!activeIndex) {
     return;
   }
+  log(output, `Search Panel opening. files=${activeIndex.files.length}`);
 
   const panel = vscode.window.createWebviewPanel(
     'codemapSearchPanel',
@@ -310,26 +352,36 @@ async function openSearchPanel(
   );
 
   panel.webview.html = getSearchPanelHtml(panel.webview);
+  log(output, 'Search Panel webview HTML assigned.');
 
   panel.webview.onDidReceiveMessage(async (message: PanelMessage) => {
-    if (message.type === 'search') {
-      const config = vscode.workspace.getConfiguration('codemap');
-      const maxTextMatches = config.get<number>('maxTextMatches', 80);
-      const results = searchIndex(activeIndex, message.query, {
-        scope: panelModeToSearchScope(message.mode),
-        maxTextMatches,
-        limit: 150
-      });
-      await panel.webview.postMessage({
-        type: 'results',
-        query: message.query,
-        results: groupPanelResults(results)
-      });
-      return;
-    }
+    try {
+      if (message.type === 'search') {
+        const config = vscode.workspace.getConfiguration('codemap');
+        const maxTextMatches = config.get<number>('maxTextMatches', 80);
+        const scope = panelModeToSearchScope(message.mode);
+        const startedAt = Date.now();
+        const results = searchIndex(activeIndex, message.query, {
+          scope,
+          maxTextMatches,
+          limit: 150
+        });
+        const groupedResults = groupPanelResults(results);
+        log(output, `Panel search query="${message.query}" mode=${message.mode} scope=${scope} rawResults=${results.length} groups=${groupedResults.length} durationMs=${Date.now() - startedAt}`);
+        await panel.webview.postMessage({
+          type: 'results',
+          query: message.query,
+          seq: message.seq,
+          results: groupedResults
+        });
+        return;
+      }
 
-    if (message.type === 'open') {
-      await openResult(message.result);
+      if (message.type === 'open') {
+        await openResult(message.result, output);
+      }
+    } catch (error) {
+      showLoggedError(output, `Search Panel message failed: ${message.type}`, error);
     }
   });
 }
@@ -369,7 +421,8 @@ function toQuickPickItems(results: SearchResult[]): SearchEverywhereItem[] {
   return items;
 }
 
-async function openResult(result: SearchResult): Promise<void> {
+async function openResult(result: SearchResult, output: vscode.OutputChannel): Promise<void> {
+  log(output, `Opening result kind=${result.kind} label="${result.label}" path=${result.location.relativePath}:${result.location.line + 1}`);
   const uri = vscode.Uri.file(path.join(result.location.workspaceFolder, result.location.relativePath));
   const document = await vscode.workspace.openTextDocument(uri);
   const editor = await vscode.window.showTextDocument(document);
@@ -398,7 +451,7 @@ function iconForKind(kind: CodeMapResultKind): string {
 type PanelMode = 'all' | 'symbols' | 'classes' | 'functions' | 'files' | 'text';
 
 type PanelMessage =
-  | { type: 'search'; query: string; mode: PanelMode }
+  | { type: 'search'; query: string; mode: PanelMode; seq?: number }
   | { type: 'open'; result: SearchResult };
 
 function panelModeToSearchScope(mode: PanelMode): SearchScope {
@@ -624,14 +677,23 @@ function getSearchPanelHtml(webview: vscode.Webview): string {
     let latestFlat = [];
     let selectedIndex = 0;
     let timer;
+    let requestSeq = 0;
+    let lastSearchKey = '';
 
     query.focus();
 
     function search() {
       clearTimeout(timer);
       timer = setTimeout(() => {
-        vscode.postMessage({ type: 'search', query: query.value, mode });
-      }, 80);
+        const searchKey = mode + '\\n' + query.value;
+        if (searchKey === lastSearchKey) {
+          return;
+        }
+
+        lastSearchKey = searchKey;
+        requestSeq += 1;
+        vscode.postMessage({ type: 'search', query: query.value, mode, seq: requestSeq });
+      }, 140);
     }
 
     tabs.forEach((tab) => {
@@ -665,6 +727,10 @@ function getSearchPanelHtml(webview: vscode.Webview): string {
 
     window.addEventListener('message', (event) => {
       if (event.data.type !== 'results') {
+        return;
+      }
+
+      if (event.data.seq && event.data.seq < requestSeq) {
         return;
       }
 
@@ -708,7 +774,7 @@ function getSearchPanelHtml(webview: vscode.Webview): string {
           row.querySelector('.name').textContent = item.label;
           row.querySelector('.path').textContent = item.description || '';
           row.querySelector('.detail').textContent = item.detail || item.preview || '';
-          row.addEventListener('click', () => vscode.postMessage({ type: 'open', result: item }));
+          row.addEventListener('click', () => openResult(item));
           row.addEventListener('mouseenter', () => setSelected(Number(row.dataset.resultIndex)));
           results.appendChild(row);
           flatIndex += 1;
@@ -750,7 +816,12 @@ function getSearchPanelHtml(webview: vscode.Webview): string {
         return;
       }
 
-      vscode.postMessage({ type: 'open', result: latestFlat[selectedIndex] });
+      openResult(latestFlat[selectedIndex]);
+    }
+
+    function openResult(item) {
+      clearTimeout(timer);
+      vscode.postMessage({ type: 'open', result: item });
     }
 
     function icon(kind) {
@@ -819,6 +890,52 @@ function reportBuildProgress(
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function runLoggedCommand(
+  output: vscode.OutputChannel,
+  status: vscode.StatusBarItem,
+  name: string,
+  task: () => Promise<void>
+): Promise<void> {
+  log(output, `Command started: ${name}.`);
+  try {
+    await task();
+    log(output, `Command completed: ${name}.`);
+  } catch (error) {
+    status.text = 'CodeMap: error';
+    showLoggedError(output, `${name} failed`, error);
+  }
+}
+
+function showLoggedError(output: vscode.OutputChannel, context: string, error: unknown): void {
+  logError(output, context, error);
+  output.show(true);
+  vscode.window.showErrorMessage(`${context}: ${getErrorMessage(error)}. See CodeMap logs for details.`);
+}
+
+function log(output: vscode.OutputChannel, message: string): void {
+  output.appendLine(`[CodeMap ${new Date().toISOString()}] ${message}`);
+}
+
+function logError(output: vscode.OutputChannel, context: string, error: unknown): void {
+  output.appendLine(`[CodeMap ${new Date().toISOString()}] ERROR: ${context}`);
+  output.appendLine(formatError(error));
+}
+
+function formatError(error: unknown): string {
+  if (error instanceof Error) {
+    return [
+      `${error.name}: ${error.message}`,
+      error.stack ? `Stack:\n${error.stack}` : undefined
+    ].filter(Boolean).join('\n');
+  }
+
+  try {
+    return JSON.stringify(error, null, 2);
+  } catch {
+    return String(error);
+  }
 }
 
 function setReadyStatus(status: vscode.StatusBarItem, index: { files: unknown[] }): void {
