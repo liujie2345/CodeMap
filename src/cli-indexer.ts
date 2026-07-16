@@ -12,14 +12,19 @@ export const CLI_DEFAULT_INCLUDE_EXTENSIONS = new Set([
 ]);
 
 const DEFAULT_TEXT_LINE_LIMIT = 200;
-const DEFAULT_TOTAL_TEXT_LINE_LIMIT = 0;
+const DEFAULT_TOTAL_TEXT_LINE_LIMIT = 1000000;
 const DEFAULT_MAX_FILE_SIZE_BYTES = 1024 * 1024;
+const CLI_INDEX_CONCURRENCY = 64;
 const DEFAULT_EXCLUDED_DIRS = new Set([
   '.git', '.codemap', 'node_modules', 'dist', 'build', 'coverage',
   '.next', '.turbo', '.cache', '.venv', 'venv', '__pycache__',
   '.pytest_cache', '.mypy_cache', '.ruff_cache', 'assets', 'resources',
   'static', 'images', 'textures', 'audio', 'video', 'logs', 'tmp',
-  'temp', 'vendor', 'generated'
+  'temp', 'vendor', 'generated',
+  'site-packages', '_vendor', '.tox',
+  'openpyxl', 'lxml', 'numpy', 'pandas', 'matplotlib', 'scipy',
+  'requests', 'pkg_resources', 'setuptools', 'pytest', 'dateutil',
+  'luac', 'unpack'
 ]);
 
 export interface CliIndexOptions {
@@ -43,11 +48,21 @@ export async function buildCliIndex(options: CliIndexOptions): Promise<CodeMapIn
   const indexedFiles: CodeMapFile[] = [];
   let remainingTextLines = DEFAULT_TOTAL_TEXT_LINE_LIMIT;
 
-  for (const filePath of files) {
-    const indexed = await indexCliFile(root, filePath, maxFileSizeBytes, Math.min(DEFAULT_TEXT_LINE_LIMIT, remainingTextLines));
-    if (indexed) {
-      indexedFiles.push(indexed);
-      remainingTextLines = Math.max(0, remainingTextLines - indexed.textLines.length);
+  for (let index = 0; index < files.length; index += CLI_INDEX_CONCURRENCY) {
+    const batchEnd = Math.min(index + CLI_INDEX_CONCURRENCY, files.length);
+    const batchFiles = files.slice(index, batchEnd);
+    const batchResults = await Promise.all(
+      batchFiles.map(async (filePath) => {
+        const textLineLimit = Math.min(DEFAULT_TEXT_LINE_LIMIT, remainingTextLines);
+        return indexCliFile(root, filePath, maxFileSizeBytes, textLineLimit);
+      })
+    );
+
+    for (const indexed of batchResults) {
+      if (indexed) {
+        indexedFiles.push(indexed);
+        remainingTextLines = Math.max(0, remainingTextLines - indexed.textLines.length);
+      }
     }
   }
 
@@ -85,33 +100,60 @@ export async function syncCliIndex(options: CliIndexOptions): Promise<CliSyncRes
   let addedFiles = 0;
   let updatedFiles = 0;
 
-  for (const filePath of files) {
-    const relativePath = toRelativePath(root, filePath);
-    seen.add(relativePath);
-    const stat = await fs.stat(filePath);
-    const existing = existingByPath.get(relativePath);
+  type SyncOutcome =
+    | { kind: 'preserved'; relativePath: string; existing: CodeMapFile }
+    | { kind: 'indexed'; relativePath: string; wasExisting: boolean; indexed: CodeMapFile }
+    | { kind: 'skip'; relativePath: string };
 
-    if (existing && existing.size === stat.size && existing.mtimeMs === stat.mtimeMs) {
-      const preserved = {
-        ...existing,
-        textLines: existing.textLines.slice(0, Math.min(DEFAULT_TEXT_LINE_LIMIT, remainingTextLines))
-      };
-      nextFiles.push(preserved);
-      remainingTextLines = Math.max(0, remainingTextLines - preserved.textLines.length);
-      continue;
-    }
+  for (let index = 0; index < files.length; index += CLI_INDEX_CONCURRENCY) {
+    const batchEnd = Math.min(index + CLI_INDEX_CONCURRENCY, files.length);
+    const batchFiles = files.slice(index, batchEnd);
+    const batchOutcomes = await Promise.all(
+      batchFiles.map(async (filePath): Promise<SyncOutcome | undefined> => {
+        const relativePath = toRelativePath(root, filePath);
+        seen.add(relativePath);
+        let stat;
+        try {
+          stat = await fs.stat(filePath);
+        } catch {
+          return undefined;
+        }
+        const existing = existingByPath.get(relativePath);
 
-    const indexed = await indexCliFile(root, filePath, maxFileSizeBytes, Math.min(DEFAULT_TEXT_LINE_LIMIT, remainingTextLines));
-    if (!indexed) {
-      continue;
-    }
+        if (stat.size > maxFileSizeBytes) {
+          return { kind: 'skip', relativePath };
+        }
+        if (existing && existing.size === stat.size && existing.mtimeMs === stat.mtimeMs) {
+          return { kind: 'preserved', relativePath, existing };
+        }
 
-    nextFiles.push(indexed);
-    remainingTextLines = Math.max(0, remainingTextLines - indexed.textLines.length);
-    if (existing) {
-      updatedFiles += 1;
-    } else {
-      addedFiles += 1;
+        const textLineLimit = Math.min(DEFAULT_TEXT_LINE_LIMIT, remainingTextLines);
+        const indexed = await indexCliFile(root, filePath, maxFileSizeBytes, textLineLimit);
+        if (!indexed) {
+          return { kind: 'skip', relativePath };
+        }
+        return { kind: 'indexed', relativePath, wasExisting: Boolean(existing), indexed };
+      })
+    );
+
+    for (const outcome of batchOutcomes) {
+      if (!outcome) continue;
+      if (outcome.kind === 'preserved') {
+        const preserved = {
+          ...outcome.existing,
+          textLines: outcome.existing.textLines.slice(0, Math.min(DEFAULT_TEXT_LINE_LIMIT, remainingTextLines))
+        };
+        nextFiles.push(preserved);
+        remainingTextLines = Math.max(0, remainingTextLines - preserved.textLines.length);
+      } else if (outcome.kind === 'indexed') {
+        nextFiles.push(outcome.indexed);
+        remainingTextLines = Math.max(0, remainingTextLines - outcome.indexed.textLines.length);
+        if (outcome.wasExisting) {
+          updatedFiles += 1;
+        } else {
+          addedFiles += 1;
+        }
+      }
     }
   }
 
@@ -337,7 +379,26 @@ function extractPythonSymbols(content: string, workspaceFolder: string, relative
 type Declaration = { kind: CodeMapSymbol['kind']; match: RegExpMatchArray | null };
 
 function getDeclarations(trimmed: string, language: string): Declaration[] {
-  if (!trimmed || isLikelyComment(trimmed)) {
+  if (!trimmed) {
+    return [];
+  }
+
+  if (language === 'lua') {
+    const luacatsClass = trimmed.match(/^---+\s*@class\s+([A-Za-z_][\w.]*)/);
+    if (luacatsClass) {
+      return [{ kind: 'class', match: luacatsClass }];
+    }
+    const luacatsAlias = trimmed.match(/^---+\s*@alias\s+([A-Za-z_][\w.]*)/);
+    if (luacatsAlias) {
+      return [{ kind: 'type', match: luacatsAlias }];
+    }
+    const luacatsEnum = trimmed.match(/^---+\s*@enum\s+([A-Za-z_][\w.]*)/);
+    if (luacatsEnum) {
+      return [{ kind: 'type', match: luacatsEnum }];
+    }
+  }
+
+  if (isLikelyComment(trimmed)) {
     return [];
   }
 

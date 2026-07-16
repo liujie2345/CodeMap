@@ -1,8 +1,9 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { BuildIndexProgress, CodeMapIndexer, DEFAULT_INCLUDE_GLOB } from './indexer';
-import { SearchScope, searchIndex } from './search';
+import { searchWithCachedSymbols, SearchScope, isSearchCacheReady } from './search';
 import { CodeMapIndex, CodeMapResultKind, SearchResult } from './types';
+import { initIndexWatcher, pauseWatcher, resumeWatcher } from './index-watcher';
 
 interface SearchEverywhereItem extends vscode.QuickPickItem {
   result?: SearchResult;
@@ -20,10 +21,12 @@ const GROUP_LABELS: Record<CodeMapResultKind, string> = {
 const GROUP_ORDER: CodeMapResultKind[] = ['class', 'interface', 'type', 'function', 'file', 'text'];
 let backgroundSyncTimer: NodeJS.Timeout | undefined;
 let backgroundSyncRunning = false;
+let buildOrSyncRunning = false;
+let indexCleared = false;
 
 export function activate(context: vscode.ExtensionContext): void {
   const output = vscode.window.createOutputChannel('CodeMap');
-  const indexer = new CodeMapIndexer(output);
+  const indexer = new CodeMapIndexer(output, context.extensionPath);
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   status.text = 'CodeMap';
   status.tooltip = 'CodeMap Search Everywhere';
@@ -36,8 +39,20 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand('codemap.buildIndex', async () => {
       log(output, 'Command started: Build Index.');
+      // Wait for any in-flight background sync to finish before starting a full build.
+      if (backgroundSyncRunning) {
+        log(output, 'Waiting for background sync to finish before build...');
+        status.text = 'CodeMap: waiting';
+        const waitStart = Date.now();
+        while (backgroundSyncRunning) {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+        log(output, `Background sync finished after ${Date.now() - waitStart}ms, starting build.`);
+      }
       await withProgress('Building CodeMap index', async (progress) => {
         status.text = 'CodeMap: indexing';
+        buildOrSyncRunning = true;
+        pauseWatcher();
         try {
           let lastProcessed = 0;
           const index = await indexer.buildIndex((state) => {
@@ -45,11 +60,15 @@ export function activate(context: vscode.ExtensionContext): void {
             lastProcessed = state.processed;
           });
           setReadyStatus(status, index);
+          indexCleared = false;
           log(output, `Command completed: Build Index. files=${index.files.length}`);
           vscode.window.showInformationMessage(`CodeMap indexed ${index.files.length} files.`);
         } catch (error) {
           status.text = 'CodeMap: error';
           showLoggedError(output, 'Build Index failed', error);
+        } finally {
+          buildOrSyncRunning = false;
+          resumeWatcher();
         }
       });
     }),
@@ -70,43 +89,47 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('codemap.clearIndex', async () => {
       log(output, 'Command started: Clear Index.');
+      // Block background sync BEFORE the modal — the 1500ms timer can fire while
+      // the user is still reading the confirmation dialog.
+      indexCleared = true;
+      if (backgroundSyncTimer) {
+        clearTimeout(backgroundSyncTimer);
+        backgroundSyncTimer = undefined;
+      }
+      // Force-cancel any in-flight background sync — don't wait for it.
+      if (backgroundSyncRunning) {
+        log(output, 'Cancelling in-flight background sync before clear.');
+        indexer.cancel();
+      }
       const answer = await vscode.window.showWarningMessage(
         'Clear the CodeMap index for this workspace?',
         { modal: true },
         'Clear Index'
       );
       if (answer !== 'Clear Index') {
+        indexCleared = false;
         return;
       }
 
-      await indexer.clearIndex();
-      status.text = 'CodeMap: no index';
-      log(output, 'Command completed: Clear Index.');
-      vscode.window.showInformationMessage('CodeMap index cleared.');
+      status.text = 'CodeMap: clearing';
+      pauseWatcher();
+      buildOrSyncRunning = true;
+      try {
+        await indexer.clearIndex();
+        status.text = 'CodeMap: no index';
+        log(output, 'Command completed: Clear Index.');
+        vscode.window.showInformationMessage('CodeMap index cleared.');
+      } catch (error) {
+        status.text = 'CodeMap: error';
+        showLoggedError(output, 'Clear Index failed', error);
+      } finally {
+        buildOrSyncRunning = false;
+        resumeWatcher();
+      }
     })
   );
 
-  const watcher = vscode.workspace.createFileSystemWatcher(DEFAULT_INCLUDE_GLOB);
-  const ignoreWatcher = vscode.workspace.createFileSystemWatcher('**/.codemapignore');
-  context.subscriptions.push(
-    watcher,
-    watcher.onDidCreate((uri) => {
-      log(output, `Watcher create: ${uri.fsPath}`);
-      void indexer.updateFile(uri);
-    }),
-    watcher.onDidChange((uri) => {
-      log(output, `Watcher change: ${uri.fsPath}`);
-      void indexer.updateFile(uri);
-    }),
-    watcher.onDidDelete((uri) => {
-      log(output, `Watcher delete: ${uri.fsPath}`);
-      void indexer.removeFile(uri);
-    }),
-    ignoreWatcher,
-    ignoreWatcher.onDidCreate(() => scheduleBackgroundSync(indexer, status, output)),
-    ignoreWatcher.onDidChange(() => scheduleBackgroundSync(indexer, status, output)),
-    ignoreWatcher.onDidDelete(() => scheduleBackgroundSync(indexer, status, output))
-  );
+  initIndexWatcher(context, indexer, status, output, () => scheduleBackgroundSync(indexer, status, output));
 
   void indexer.getIndex().then((index) => {
     if (index) {
@@ -133,6 +156,7 @@ async function searchEverywhere(
   status: vscode.StatusBarItem,
   output: vscode.OutputChannel
 ): Promise<void> {
+  status.text = 'CodeMap: loading';
   let index = await indexer.getIndex();
   if (!index) {
     const answer = await vscode.window.showInformationMessage(
@@ -142,19 +166,30 @@ async function searchEverywhere(
     );
 
     if (answer !== 'Build Index') {
+      status.text = 'CodeMap: no index';
       return;
     }
 
     index = await withProgress('Building CodeMap index', async (progress) => {
       status.text = 'CodeMap: indexing';
-      let lastProcessed = 0;
-      const built = await indexer.buildIndex((state) => {
-        reportBuildProgress(progress, state, lastProcessed);
-        lastProcessed = state.processed;
-      });
-      setReadyStatus(status, built);
-      return built;
+      buildOrSyncRunning = true;
+      pauseWatcher();
+      try {
+        let lastProcessed = 0;
+        const built = await indexer.buildIndex((state) => {
+          reportBuildProgress(progress, state, lastProcessed);
+          lastProcessed = state.processed;
+        });
+        setReadyStatus(status, built);
+        indexCleared = false;
+        return built;
+      } finally {
+        buildOrSyncRunning = false;
+        resumeWatcher();
+      }
     });
+  } else {
+    setReadyStatus(status, index);
   }
 
   const activeIndex = index;
@@ -175,12 +210,27 @@ async function searchEverywhere(
     }
   ];
 
+  // Track latest keystroke so slow search Promises triggered for older queries can be dropped.
+  let latestQuickPickQuery = '';
+
   const updateItems = debounce((query: string) => {
     try {
       const config = vscode.workspace.getConfiguration('codemap');
       const maxTextMatches = config.get<number>('maxTextMatches', 80);
       const startedAt = Date.now();
-      void searchWithText(indexer, activeIndex, query, 'all', maxTextMatches, 150).then((results) => {
+      latestQuickPickQuery = query;
+      void searchWithCachedSymbols(
+        activeIndex,
+        query,
+        'all',
+        maxTextMatches,
+        150,
+        (q, limit) => indexer.searchTextIndex(q, limit)
+      ).then((results) => {
+        if (latestQuickPickQuery !== query) {
+          log(output, `QuickPick search query="${query}" dropped (stale, latest="${latestQuickPickQuery}") durationMs=${Date.now() - startedAt}`);
+          return;
+        }
         log(output, `QuickPick search query="${query}" results=${results.length} durationMs=${Date.now() - startedAt}`);
         quickPick.items = toQuickPickItems(results);
       }).catch((error) => {
@@ -189,7 +239,7 @@ async function searchEverywhere(
     } catch (error) {
       showLoggedError(output, `QuickPick search failed for query="${query}"`, error);
     }
-  }, 70);
+  }, 200);
 
   quickPick.onDidChangeValue((value) => {
     updateItems(value);
@@ -253,14 +303,17 @@ async function syncIndexWithProgress(
   log(output, 'Command started: Sync Index.');
   await withProgress('Syncing CodeMap index', async (progress) => {
     status.text = 'CodeMap: syncing';
-    try {
-      let lastProcessed = 0;
-      const result = await indexer.syncIndex((state) => {
-        reportBuildProgress(progress, state, lastProcessed);
-        lastProcessed = state.processed;
-      });
-      setReadyStatus(status, result.index);
-      log(output, `Command completed: Sync Index. scanned=${result.scannedFiles}, added=${result.addedFiles}, updated=${result.updatedFiles}, removed=${result.removedFiles}`);
+    buildOrSyncRunning = true;
+    pauseWatcher();
+      try {
+        let lastProcessed = 0;
+        const result = await indexer.syncIndex((state) => {
+          reportBuildProgress(progress, state, lastProcessed);
+          lastProcessed = state.processed;
+        });
+        setReadyStatus(status, result.index);
+        indexCleared = false;
+        log(output, `Command completed: Sync Index. scanned=${result.scannedFiles}, added=${result.addedFiles}, updated=${result.updatedFiles}, removed=${result.removedFiles}`);
       if (showSummary) {
         vscode.window.showInformationMessage(
           `CodeMap synced ${result.scannedFiles} files (+${result.addedFiles}, ~${result.updatedFiles}, -${result.removedFiles}).`
@@ -269,6 +322,9 @@ async function syncIndexWithProgress(
     } catch (error) {
       status.text = 'CodeMap: error';
       showLoggedError(output, 'Sync Index failed', error);
+    } finally {
+      buildOrSyncRunning = false;
+      resumeWatcher();
     }
   });
 }
@@ -282,17 +338,29 @@ function scheduleBackgroundSync(
     clearTimeout(backgroundSyncTimer);
   }
 
+  if (indexCleared) {
+    log(output, 'Background sync skipped (index was just cleared).');
+    return;
+  }
+
   log(output, 'Background sync scheduled.');
   status.text = 'CodeMap: stale';
   backgroundSyncTimer = setTimeout(() => {
-    if (backgroundSyncRunning) {
+    if (backgroundSyncRunning || buildOrSyncRunning) {
+      log(output, 'Background sync skipped (build/sync already running).');
+      return;
+    }
+
+    if (indexCleared) {
+      log(output, 'Background sync skipped (index was just cleared).');
       return;
     }
 
     backgroundSyncRunning = true;
     status.text = 'CodeMap: syncing';
     log(output, 'Background sync started.');
-    void indexer.syncIndex()
+    pauseWatcher();
+    void indexer.syncIndex(undefined, true)
       .then((result) => {
         setReadyStatus(status, result.index);
         log(output, `Background sync completed. scanned=${result.scannedFiles}, files=${result.index.files.length}`);
@@ -303,6 +371,7 @@ function scheduleBackgroundSync(
       })
       .finally(() => {
         backgroundSyncRunning = false;
+        resumeWatcher();
       });
   }, 1500);
 }
@@ -313,6 +382,8 @@ async function openSearchPanel(
   context: vscode.ExtensionContext,
   output: vscode.OutputChannel
 ): Promise<void> {
+  status.text = 'CodeMap: loading';
+  log(output, 'Opening search panel, loading index...');
   let index = await indexer.getIndex();
   if (!index) {
     const answer = await vscode.window.showInformationMessage(
@@ -322,19 +393,30 @@ async function openSearchPanel(
     );
 
     if (answer !== 'Build Index') {
+      status.text = 'CodeMap: no index';
       return;
     }
 
     index = await withProgress('Building CodeMap index', async (progress) => {
       status.text = 'CodeMap: indexing';
-      let lastProcessed = 0;
-      const built = await indexer.buildIndex((state) => {
-        reportBuildProgress(progress, state, lastProcessed);
-        lastProcessed = state.processed;
-      });
-      setReadyStatus(status, built);
-      return built;
+      buildOrSyncRunning = true;
+      pauseWatcher();
+      try {
+        let lastProcessed = 0;
+        const built = await indexer.buildIndex((state) => {
+          reportBuildProgress(progress, state, lastProcessed);
+          lastProcessed = state.processed;
+        });
+        setReadyStatus(status, built);
+        indexCleared = false;
+        return built;
+      } finally {
+        buildOrSyncRunning = false;
+        resumeWatcher();
+      }
     });
+  } else {
+    setReadyStatus(status, index);
   }
 
   const activeIndex = index;
@@ -357,14 +439,50 @@ async function openSearchPanel(
   panel.webview.html = getSearchPanelHtml(panel.webview);
   log(output, 'Search Panel webview HTML assigned.');
 
+  let latestRequestSeq = 0;
+
   panel.webview.onDidReceiveMessage(async (message: PanelMessage) => {
     try {
       if (message.type === 'search') {
+        // Drop stale search requests so fast typing doesn't queue every old query behind the latest one.
+        if (typeof message.seq === 'number' && message.seq < latestRequestSeq) {
+          return;
+        }
+        latestRequestSeq = message.seq ?? latestRequestSeq;
+        const mySeq = message.seq ?? -1;
+
         const config = vscode.workspace.getConfiguration('codemap');
         const maxTextMatches = config.get<number>('maxTextMatches', 80);
         const scope = panelModeToSearchScope(message.mode);
         const startedAt = Date.now();
-        const results = await searchWithText(indexer, activeIndex, message.query, scope, maxTextMatches, 150);
+
+        if (!isSearchCacheReady(activeIndex)) {
+          log(output, `Panel search query="${message.query}" cache not ready, asking user to retry.`);
+          await panel.webview.postMessage({
+            type: 'results',
+            query: message.query,
+            seq: message.seq,
+            results: [],
+            cacheLoading: true
+          });
+          return;
+        }
+
+        const results = await searchWithCachedSymbols(
+          activeIndex,
+          message.query,
+          scope,
+          maxTextMatches,
+          150,
+          (q, limit) => indexer.searchTextIndex(q, limit)
+        );
+
+        // If a newer keystroke came in while we were awaiting, drop the stale results silently.
+        if (typeof message.seq === 'number' && message.seq < latestRequestSeq) {
+          log(output, `Panel search query="${message.query}" seq=${mySeq} dropped (stale, latest=${latestRequestSeq}) durationMs=${Date.now() - startedAt}`);
+          return;
+        }
+
         const groupedResults = groupPanelResults(results);
         log(output, `Panel search query="${message.query}" mode=${message.mode} scope=${scope} rawResults=${results.length} groups=${groupedResults.length} durationMs=${Date.now() - startedAt}`);
         await panel.webview.postMessage({
@@ -470,38 +588,6 @@ function panelModeToSearchScope(mode: PanelMode): SearchScope {
   }
 }
 
-async function searchWithText(
-  indexer: CodeMapIndexer,
-  index: CodeMapIndex,
-  query: string,
-  scope: SearchScope,
-  maxTextMatches: number,
-  limit: number
-): Promise<SearchResult[]> {
-  if (!query.trim()) {
-    return [];
-  }
-
-  if (scope === 'text') {
-    return indexer.searchTextIndex(query, Math.min(maxTextMatches, limit));
-  }
-
-  const symbolResults = searchIndex(index, query, {
-    scope,
-    maxTextMatches: 0,
-    limit
-  });
-
-  if (scope !== 'all' || maxTextMatches <= 0) {
-    return symbolResults;
-  }
-
-  const textResults = await indexer.searchTextIndex(query, maxTextMatches);
-  return [...symbolResults, ...textResults]
-    .sort(compareSearchResults)
-    .slice(0, limit);
-}
-
 function compareSearchResults(left: SearchResult, right: SearchResult): number {
   return right.score - left.score || left.label.localeCompare(right.label);
 }
@@ -557,12 +643,16 @@ function getSearchPanelHtml(webview: vscode.Webview): string {
       height: 100vh;
     }
     .search {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
       padding: 14px 16px 10px;
       background: var(--panel);
       border-bottom: 1px solid var(--border);
     }
     input {
-      width: 100%;
+      flex: 1;
+      min-width: 200px;
       height: 40px;
       padding: 0 13px;
       border: 1px solid var(--vscode-input-border);
@@ -577,6 +667,15 @@ function getSearchPanelHtml(webview: vscode.Webview): string {
       border-color: var(--focus);
       box-shadow: 0 0 0 1px var(--focus);
     }
+    .submit {
+      height: 40px;
+      padding: 0 18px;
+      background: var(--active);
+      color: var(--active-fg);
+      font-size: 13px;
+      font-weight: 600;
+    }
+    .submit:hover { opacity: 0.92; }
     .tabs {
       display: flex;
       gap: 4px;
@@ -609,6 +708,27 @@ function getSearchPanelHtml(webview: vscode.Webview): string {
       padding: 32px 18px;
       color: var(--muted);
       font-size: 13px;
+    }
+    .loading {
+      display: none;
+      align-items: center;
+      justify-content: center;
+      gap: 10px;
+      padding: 24px 18px;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .loading.show { display: flex; }
+    .spinner {
+      width: 14px;
+      height: 14px;
+      border: 2px solid var(--muted);
+      border-top-color: transparent;
+      border-radius: 50%;
+      animation: codemap-spin 0.7s linear infinite;
+    }
+    @keyframes codemap-spin {
+      to { transform: rotate(360deg); }
     }
     .group-title {
       position: sticky;
@@ -686,8 +806,9 @@ function getSearchPanelHtml(webview: vscode.Webview): string {
 <body>
   <div class="shell">
     <div class="search">
-      <input id="query" placeholder="Search classes, functions, interfaces, and types" autofocus />
-      <div class="hint">Up/down to select, Enter to open. Switch tabs for files or text.</div>
+      <input id="query" placeholder="Type then press Enter or click 搜索" autofocus />
+      <button id="submit" class="submit">搜索</button>
+      <div class="hint">按 Enter 或点击「搜索」触发；用 Files / Text tab 切换范围；↑↓ 选择、Enter 打开。</div>
     </div>
     <div class="tabs">
       <button data-mode="all">All</button>
@@ -700,35 +821,62 @@ function getSearchPanelHtml(webview: vscode.Webview): string {
     <div id="results" class="results">
       <div class="empty">Start typing to search the CodeMap index.</div>
     </div>
+    <div id="loading" class="loading">
+      <div class="spinner"></div>
+      <span>Searching…</span>
+    </div>
   </div>
 
   <script nonce="${nonce}">
     const vscode = acquireVsCodeApi();
     const query = document.getElementById('query');
+    const submit = document.getElementById('submit');
     const results = document.getElementById('results');
+    const loading = document.getElementById('loading');
     const tabs = Array.from(document.querySelectorAll('button[data-mode]'));
     let mode = 'symbols';
     let latestGroups = [];
     let latestFlat = [];
     let selectedIndex = 0;
-    let timer;
     let requestSeq = 0;
     let lastSearchKey = '';
 
     query.focus();
 
-    function search() {
-      clearTimeout(timer);
-      timer = setTimeout(() => {
-        const searchKey = mode + '\\n' + query.value;
-        if (searchKey === lastSearchKey) {
-          return;
-        }
+    function showResults() {
+      results.style.display = '';
+      loading.classList.remove('show');
+    }
 
-        lastSearchKey = searchKey;
-        requestSeq += 1;
-        vscode.postMessage({ type: 'search', query: query.value, mode, seq: requestSeq });
-      }, 140);
+    function showLoading() {
+      results.style.display = 'none';
+      loading.classList.add('show');
+    }
+
+    function showEmpty(message) {
+      results.style.display = '';
+      loading.classList.remove('show');
+      latestFlat = [];
+      selectedIndex = -1;
+      results.replaceChildren(makeEmpty(message));
+    }
+
+    function search() {
+      const trimmed = query.value.trim();
+      if (!trimmed) {
+        showEmpty('Type a class, function or file name then press 搜索 / Enter.');
+        return;
+      }
+
+      const searchKey = mode + '\\n' + query.value;
+      if (searchKey === lastSearchKey) {
+        return;
+      }
+
+      showLoading();
+      lastSearchKey = searchKey;
+      requestSeq += 1;
+      vscode.postMessage({ type: 'search', query: query.value, mode, seq: requestSeq });
     }
 
     tabs.forEach((tab) => {
@@ -736,15 +884,26 @@ function getSearchPanelHtml(webview: vscode.Webview): string {
         mode = tab.dataset.mode;
         tabs.forEach((item) => item.classList.toggle('active', item === tab));
         selectedIndex = 0;
-        search();
+        // Reset so changing mode re-triggers search on next submit; but also fire immediately
+        // if there is an active query, since users expect tab switches to refresh results.
+        lastSearchKey = '';
+        if (query.value.trim()) {
+          search();
+        }
       });
     });
 
-    query.addEventListener('input', search);
+    submit.addEventListener('click', search);
+
+    query.addEventListener('input', () => {
+      // Invalidate the cached "last successful query" so the next Enter / 搜索 re-fires.
+      lastSearchKey = '';
+    });
+
     query.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
         event.preventDefault();
-        openSelected();
+        search();
         return;
       }
 
@@ -769,6 +928,12 @@ function getSearchPanelHtml(webview: vscode.Webview): string {
         return;
       }
 
+      if (event.data.cacheLoading) {
+        showEmpty('Index cache is loading, please wait a moment and retry...');
+        return;
+      }
+
+      showResults();
       latestGroups = event.data.results || [];
       latestFlat = latestGroups.flatMap((group) => group.items);
       selectedIndex = latestFlat.length > 0 ? 0 : -1;
@@ -777,45 +942,60 @@ function getSearchPanelHtml(webview: vscode.Webview): string {
 
     function render() {
       if (!query.value.trim()) {
-        latestFlat = [];
-        selectedIndex = -1;
-        results.innerHTML = '<div class="empty">Start typing to search symbols. Use Files or Text when you need a wider search.</div>';
+        showEmpty('Start typing to search symbols. Use Files or Text when you need a wider search.');
         return;
       }
 
       if (latestGroups.length === 0) {
-        latestFlat = [];
-        selectedIndex = -1;
-        results.innerHTML = '<div class="empty">No CodeMap results.</div>';
+        showEmpty('No CodeMap results.');
         return;
       }
 
-      results.innerHTML = '';
+      const fragment = document.createDocumentFragment();
       let flatIndex = 0;
       for (const group of latestGroups) {
         const title = document.createElement('div');
         title.className = 'group-title';
         title.textContent = group.title;
-        results.appendChild(title);
+        fragment.appendChild(title);
 
         for (const item of group.items) {
+          const kind = document.createElement('div');
+          kind.className = 'kind';
+          kind.textContent = icon(group.kind);
+
+          const name = document.createElement('div');
+          name.className = 'name';
+          name.textContent = item.label;
+
+          const pathEl = document.createElement('div');
+          pathEl.className = 'path';
+          pathEl.textContent = item.description || '';
+
+          const detail = document.createElement('div');
+          detail.className = 'detail';
+          detail.textContent = item.detail || item.preview || '';
+
           const row = document.createElement('div');
           row.className = 'result';
           row.dataset.resultIndex = String(flatIndex);
-          row.innerHTML = '<div class="kind">' + icon(group.kind) + '</div>' +
-            '<div class="name"></div>' +
-            '<div class="path"></div>' +
-            '<div class="detail"></div>';
-          row.querySelector('.name').textContent = item.label;
-          row.querySelector('.path').textContent = item.description || '';
-          row.querySelector('.detail').textContent = item.detail || item.preview || '';
+          const myIndex = flatIndex;
           row.addEventListener('click', () => openResult(item));
-          row.addEventListener('mouseenter', () => setSelected(Number(row.dataset.resultIndex)));
-          results.appendChild(row);
+          row.addEventListener('mouseenter', () => setSelected(myIndex));
+          row.append(kind, name, pathEl, detail);
+          fragment.appendChild(row);
           flatIndex += 1;
         }
       }
+      results.replaceChildren(fragment);
       applySelection();
+    }
+
+    function makeEmpty(message) {
+      const div = document.createElement('div');
+      div.className = 'empty';
+      div.textContent = message;
+      return div;
     }
 
     function setSelected(nextIndex) {
@@ -846,16 +1026,7 @@ function getSearchPanelHtml(webview: vscode.Webview): string {
       }
     }
 
-    function openSelected() {
-      if (selectedIndex < 0 || selectedIndex >= latestFlat.length) {
-        return;
-      }
-
-      openResult(latestFlat[selectedIndex]);
-    }
-
     function openResult(item) {
-      clearTimeout(timer);
       vscode.postMessage({ type: 'open', result: item });
     }
 
@@ -911,6 +1082,17 @@ function reportBuildProgress(
   state: BuildIndexProgress,
   lastProcessed: number
 ): void {
+  const stageMessages: Record<string, string> = {
+    'saving-text': 'Saving text shards...',
+    'saving-index': 'Saving index to disk...',
+    'prewarming': 'Building search cache...'
+  };
+
+  if (state.stage && stageMessages[state.stage]) {
+    progress.report({ message: stageMessages[state.stage] });
+    return;
+  }
+
   const increment = state.total > 0 ? ((state.processed - lastProcessed) / state.total) * 100 : 0;
   const processed = Math.min(state.processed + 1, state.total);
   const message = state.total > 0

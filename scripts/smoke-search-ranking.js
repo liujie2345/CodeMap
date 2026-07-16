@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { searchIndex } = require('../out/search');
+const { searchIndex, prewarmSearchCache } = require('../out/search');
 
 const workspaceFolder = 'E:/tmp/ranking';
 const index = {
@@ -18,6 +18,7 @@ const index = {
   ]
 };
 
+prewarmSearchCache(index);
 const results = searchIndex(index, 'create-kubeconfig', 10);
 assert.equal(results[0].label, 'create-kubeconfig');
 assert.ok(results[0].score > results[1].score);
@@ -37,6 +38,7 @@ largeIndex.files.push(file('src/create-kubeconfig.lua', [
   symbol('function', 'create-kubeconfig', 'src/create-kubeconfig.lua', 1)
 ]));
 
+prewarmSearchCache(largeIndex);
 const largeResults = searchIndex(largeIndex, 'create', { scope: 'symbols', limit: 150 });
 assert.ok(largeResults.length <= 150);
 

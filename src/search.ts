@@ -29,6 +29,11 @@ export function searchIndex(index: CodeMapIndex, rawQuery: string, maxTextMatche
     return [];
   }
 
+  const cache = getSearchCache(index);
+  if (!cache) {
+    return [];
+  }
+
   const options = typeof maxTextMatchesOrOptions === 'number'
     ? { maxTextMatches: maxTextMatchesOrOptions }
     : maxTextMatchesOrOptions;
@@ -39,7 +44,6 @@ export function searchIndex(index: CodeMapIndex, rawQuery: string, maxTextMatche
   const includeFiles = scope === 'all' || scope === 'files';
   const includeSymbols = scope === 'all' || scope === 'symbols' || scope === 'classes' || scope === 'functions';
   const includeText = scope === 'all' || scope === 'text';
-  const cache = getSearchCache(index);
 
   const results = new BoundedSearchResults(candidateLimit);
   let textMatches = 0;
@@ -101,6 +105,108 @@ export function searchIndex(index: CodeMapIndex, rawQuery: string, maxTextMatche
   }
 
   return results.toSorted(limit);
+}
+
+// Prefix-extension cache: When typing "User" -> "UserS" -> "UserSe" -> "UserService"
+// any result matching the longer query also matched the previous shorter prefix
+// (assuming lenient includes() matching). This avoids re-running scorePreparedCandidate
+// across millions of symbols on every keystroke.
+let symbolSearchState: {
+  scope: SearchScope | undefined;
+  query: string;
+  results: SearchResult[];
+} = {
+  scope: undefined,
+  query: '',
+  results: []
+};
+
+export function invalidateSymbolSearchState(): void {
+  symbolSearchState = { scope: undefined, query: '', results: [] };
+}
+
+export function prewarmSearchCache(index: CodeMapIndex): void {
+  // Synchronous fallback: build cache on main thread.
+  // Used when no worker is available, or by tests/CLI that need the cache immediately.
+  const cached = searchCacheByIndex.get(index);
+  if (cached && cached.createdAt === index.createdAt && cached.fileCount === index.files.length) {
+    return;
+  }
+  const built = buildSearchCache(index);
+  searchCacheByIndex.set(index, built);
+}
+
+export interface PrewarmWorkerResult {
+  files: PreparedFileCandidate[];
+  symbols: PreparedSymbolCandidate[];
+  classSymbols: PreparedSymbolCandidate[];
+  functionSymbols: PreparedSymbolCandidate[];
+  text: PreparedTextCandidate[];
+}
+
+export function setSearchCacheFromWorkerResult(index: CodeMapIndex, result: PrewarmWorkerResult): void {
+  const built: SearchCache = {
+    createdAt: index.createdAt,
+    fileCount: index.files.length,
+    files: result.files,
+    symbols: result.symbols,
+    classSymbols: result.classSymbols,
+    functionSymbols: result.functionSymbols,
+    text: result.text
+  };
+  searchCacheByIndex.set(index, built);
+}
+
+export function isSearchCacheReady(index: CodeMapIndex): boolean {
+  const cached = searchCacheByIndex.get(index);
+  return !!cached && cached.createdAt === index.createdAt && cached.fileCount === index.files.length;
+}
+
+export function searchWithCachedSymbols(
+  index: CodeMapIndex,
+  query: string,
+  scope: SearchScope,
+  maxTextMatches: number,
+  limit: number,
+  textFetcher: (query: string, limit: number) => Promise<SearchResult[]>
+): Promise<SearchResult[]> {
+  if (!query.trim()) {
+    return Promise.resolve([]);
+  }
+
+  if (scope === 'text') {
+    return textFetcher(query, Math.min(maxTextMatches, limit));
+  }
+
+  const queryLower = query.toLowerCase();
+  const cacheScope = symbolSearchState.scope;
+  const cacheQuery = symbolSearchState.query;
+  const cacheHit = cacheScope === scope
+    && cacheQuery !== ''
+    && queryLower.startsWith(cacheQuery.toLowerCase())
+    && queryLower.length > cacheQuery.length
+    && symbolSearchState.results.length > 0;
+
+  let symbolResults: SearchResult[];
+  if (cacheHit) {
+    symbolResults = symbolSearchState.results.filter((result) => result.label.toLowerCase().includes(queryLower));
+    // Keep refining forward: cache the new query so further keystrokes stay cache-hot.
+    symbolSearchState.query = query;
+    symbolSearchState.results = symbolResults;
+  } else {
+    symbolResults = searchIndex(index, query, { scope, maxTextMatches: 0, limit });
+    symbolSearchState.scope = scope;
+    symbolSearchState.query = query;
+    symbolSearchState.results = symbolResults;
+  }
+
+  if (scope !== 'all' || maxTextMatches <= 0) {
+    return Promise.resolve(symbolResults);
+  }
+
+  return textFetcher(query, maxTextMatches).then((textResults) => {
+    return [...symbolResults, ...textResults].sort(compareResults).slice(0, limit);
+  });
 }
 
 function symbolInScope(kind: CodeMapResultKind, scope: SearchScope): boolean {
@@ -362,15 +468,14 @@ interface SearchCache {
   text: PreparedTextCandidate[];
 }
 
-function getSearchCache(index: CodeMapIndex): SearchCache {
+function getSearchCache(index: CodeMapIndex): SearchCache | undefined {
   const cached = searchCacheByIndex.get(index);
   if (cached && cached.createdAt === index.createdAt && cached.fileCount === index.files.length) {
     return cached;
   }
-
-  const built = buildSearchCache(index);
-  searchCacheByIndex.set(index, built);
-  return built;
+  // Cache not ready (prewarm still running in worker). Return undefined so callers
+  // can show "index loading" instead of blocking the main thread with a sync build.
+  return undefined;
 }
 
 function buildSearchCache(index: CodeMapIndex): SearchCache {
